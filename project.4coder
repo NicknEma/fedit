@@ -1,0 +1,43 @@
+version(2);
+project_name = "Fedit";
+
+patterns = {
+	"*.c",
+	"*.h",
+	"*.bat",
+	"*.sh",
+	"*.4coder",
+};
+
+blacklist_patterns = {
+	".*",
+};
+
+load_paths_base = {
+	{ {"."}, .recursive = true, .relative = true },
+};
+
+load_paths = {
+	.win   = load_paths_base,
+	.linux = load_paths_base,
+	.mac   = load_paths_base,
+};
+
+commands = {
+	.build = { .out = "*compilation*", .footer_panel = true, .save_dirty_files = true, .cursor_at_end = false,
+		.win   = "echo Windows build command not implemented for 4coder project.",
+		.linux = "echo Linux build command not implemented for 4coder project.",
+		.mac   = "echo Max build command not implemented for 4coder project.",
+	},
+	
+	.run = { .out = "*run*", .footer_panel = true, .save_dirty_files = false, .cursor_at_end = false,
+		.win   = "echo Windows run command not implemented for 4coder project.",
+		.linux = "echo Linux run command not implemented for 4coder project.",
+		.mac   = "echo Max run command not implemented for 4coder project.",
+	},
+};
+
+fkey_command = {
+	.F1 = "build",
+	.F2 = "run",
+};
