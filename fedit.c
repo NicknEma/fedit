@@ -108,6 +108,7 @@
 
 #define cast(t) (t)
 #define array_count(a) (sizeof(a)/sizeof((a)[0]))
+#define allow_break() do { int __x__ = 0; (void)__x__; } while (0)
 
 typedef  uint8_t  u8;
 typedef uint16_t u16;
@@ -121,14 +122,14 @@ typedef  int64_t i64;
 
 typedef struct Size Size;
 struct Size {
-	i64 width;
-	i64 height;
+	i32 width;
+	i32 height;
 };
 
 typedef struct Point Point;
 struct Point {
-	i64 x;
-	i64 y;
+	i32 x;
+	i32 y;
 };
 
 ////////////////////////////////
@@ -138,16 +139,38 @@ struct Point {
 
 #define CTRL_KEY(k) ((k) & 0x1f)
 
+//- Editor types
+
+enum Editor_Key {
+	Editor_Key_ARROW_UP = 256 + 1,
+	Editor_Key_ARROW_LEFT,
+	Editor_Key_ARROW_DOWN,
+	Editor_Key_ARROW_RIGHT,
+};
+typedef enum Editor_Key Editor_Key;
+
+typedef struct Editor_State Editor_State;
+struct Editor_State {
+	Point cursor_position;
+};
+
 //- Editor global variables
 
 static int exit_code = 0;
+static Editor_State state;
 
-//- Editor functions
+static FILE *logfile;
+
+//- Editor generic functions
+
+//- Editor platform-specific functions
 
 static void clear(void);
 
 static bool query_window_size(Size *size);
 static bool query_cursor_position(Point *position);
+
+static Editor_Key wait_for_key(void);
 
 #if OS_WINDOWS
 
@@ -323,13 +346,26 @@ read_byte(void) {
 	BOOL peek_ok = PeekConsoleInput(stdin_handle, &rec, 1, &recn);
 	
 	char c = 0;
-	if (peek_ok && recn > 0 && rec.EventType == KEY_EVENT) {
-		DWORD n = 0;
-		BOOL ok = ReadConsole(stdin_handle, &c, 1, &n, NULL);
-		assert(ok); // TODO: What to do?
-	} else {
-		assert(peek_ok);
+	if (peek_ok) {
+		allow_break();
 	}
+	if (peek_ok && recn > 0) {
+		allow_break();
+	}
+	
+	if (peek_ok && recn > 0) {
+		if (rec.EventType == KEY_EVENT) {
+			DWORD n = 0;
+			BOOL ok = ReadConsole(stdin_handle, &c, 1, &n, NULL);
+			assert(ok); // TODO: What to do?
+		} else {
+			BOOL read_ok = ReadConsoleInput(stdin_handle, &rec, 1, &recn);
+			assert(read_ok); // Temporary
+		}
+	} else {
+		assert(peek_ok); // Temporary
+	}
+	
 	return c;
 }
 
@@ -524,21 +560,44 @@ clear(void) {
 #endif
 }
 
-static char
-read_byte(void) {
-	// NOTE: The tutorial has a loop here to wait until the user presses a key.
-	// I don't see a point since we literally set a timeout for read() specifically
-	// so we don't block here...
-	// Maybe, instead of just returning the character, also return a bool indicating wether
-	// we read a character or not; kind of what PeekMessage does in GUI apps.
-	
+static Editor_Key
+wait_for_key(void) {
 	char c = 0;
-	int r = read(STDIN_FILENO, &c, 1);
+	while (true) {
+		// 'nread' can be 1 (if we read a character) or 0 (if we timed out)
+		int nread = read(STDIN_FILENO, &c, 1);
+		if (nread == 1) break;
+		
+		if (nread == -1 && errno != EAGAIN) {
+			// See note on the tutorial about EAGAIN on Cygwin.
+			assert(0); // read failed - Temporary; TODO: What to do? The tutorial just quits; NOTE: Maybe set a global 'should_quit' variable
+		}
+	}
 	
-	// r can be 1 (if we read a character) or 0 (if we timed out)
-	assert(r != -1 && errno != EAGAIN); // TODO: What to do? The tutorial just quits; NOTE: Maybe set a global 'should_quit' variable
-	// See note on the tutorial about EAGAIN on Cygwin.
-	return c;
+	Editor_Key key = c;
+	if (key == '\x1b') {
+		// If we read the escape character (\x1b), there's a possibility that
+		// it was the first byte in an escape sequence, so try to read
+		// more characters.
+		
+		char seq[3] = {0};
+		if (read(STDIN_FILENO, &seq[0], 1) == 1 &&
+			read(STDIN_FILENO, &seq[1], 1) == 1) {
+			// If we read 2 more characters after 1x1b before read() timed out:
+			// It probabily is an escape code, so try to parse it.
+			
+			if (seq[0] == '[') {
+				switch (seq[1]) {
+					case 'A': key = Editor_Key_ARROW_UP;    break;
+					case 'B': key = Editor_Key_ARROW_DOWN;  break;
+					case 'C': key = Editor_Key_ARROW_RIGHT; break;
+					case 'D': key = Editor_Key_ARROW_LEFT;  break;
+				}
+			}
+		}
+	}
+	
+	return key;
 }
 
 static void
@@ -562,14 +621,22 @@ int main(void) {
 	before_main();
 	enable_raw_mode();
 	
+	
+	logfile = fopen("log.txt", "w");
+	assert(logfile);
+	
 	Size size;
 	bool size_ok = query_window_size(&size);
 	assert(size_ok);
+	
+	state.cursor_position.x = 10; // Temporary
 	
 	while (true) {
 		
 		// Prepare screen
 		{
+			console_write(cast(u8 *) "\x1b[?25l", 6); // Hide cursor
+			
 			clear();
 			
 			// Temporary: draw a row
@@ -577,26 +644,59 @@ int main(void) {
 				console_write(cast(u8 *) "~", 1);
 			}
 			
-			// Draw ~ for each row
-			int y;
-			for (y = 0; y < size.height; y += 1) {
-				console_write(cast(u8 *) "~\r\n", 3);
+			{
+				// Draw ~ for each row
+				int y;
+				for (y = 0; y < size.height - 1; y += 1) {
+					console_write(cast(u8 *) "~\r\n", 3);
+				}
+				console_write(cast(u8 *) "~", 1);
 			}
 			
-			console_write(cast(u8 *) "\x1b[H", 3); // Reposition cursor
+			console_write(cast(u8 *) "\x1b[H", 3); // Reset cursor
+			
+			// Move cursor
+			char buf[32] = {0};
+			snprintf(buf, sizeof(buf), "\x1b[%d;%dH", state.cursor_position.y + 1, state.cursor_position.x + 1);
+			console_write(cast(u8 *) buf, strlen(buf));
+			
+			console_write(cast(u8 *) "\x1b[?25h", 6); // Show cursor
 		}
 		
-		// TODO: If there are things to animate, this will have to do. If there aren't,
-		// we could switch to a wait_for_byte() call that blocks, so we only repaint the whole
-		// screen when something changes instead of as often as possible.
-		// TODO: An alternative would be to just keep this non-blocking and have a flag
-		// that says wether we should repaint the screen...
-		char c = read_byte();
-		if (c == CTRL_KEY('q')) {
-			clear();
-			break;
+		Editor_Key key = wait_for_key();
+		switch (key) {
+			case CTRL_KEY('q'): {
+				clear();
+				goto main_loop_end;
+			} break;
+			
+			case Editor_Key_ARROW_UP:
+			case Editor_Key_ARROW_LEFT:
+			case Editor_Key_ARROW_DOWN:
+			case Editor_Key_ARROW_RIGHT: {
+				
+				switch (key) {
+					case Editor_Key_ARROW_LEFT: {
+						state.cursor_position.x -= 1;
+					} break;
+					case Editor_Key_ARROW_RIGHT: {
+						state.cursor_position.x += 1;
+					} break;
+					case Editor_Key_ARROW_UP: {
+						state.cursor_position.y -= 1;
+					} break;
+					case Editor_Key_ARROW_DOWN: {
+						state.cursor_position.y += 1;
+					} break;
+				}
+				
+			} break;
 		}
 	}
+	
+	main_loop_end:;
+	
+	fclose(logfile);
 	
 	disable_raw_mode();
 	return exit_code;
