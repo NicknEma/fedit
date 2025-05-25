@@ -840,9 +840,11 @@ int main(void) {
 			clear();
 			
 			// Temporary: draw a row
-			for (int x = 0; x < state.window_size.width; x += 1) {
+			// -1 because we don't print in the last column
+			for (int x = 0; x < state.window_size.width - 1; x += 1) {
 				console_write(cast(u8 *) "~", 1);
 			}
+			console_write(cast(u8 *) "\r\n", 2);
 			
 			{
 				// Draw ~ for each row
@@ -862,6 +864,11 @@ int main(void) {
 			
 			console_write(cast(u8 *) "\x1b[?25h", 6); // Show cursor
 		}
+		
+		
+		size_ok = query_window_size(&state.window_size);
+		assert(size_ok);
+		
 		
 		Editor_Key key = wait_for_key();
 		switch (key) {
