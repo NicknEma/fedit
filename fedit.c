@@ -69,7 +69,9 @@
 //~ System Headers
 
 #if OS_WINDOWS
+# define WIN32_LEAN_AND_MEAN
 # include <windows.h>
+# include <winsock2.h>
 # undef min
 # undef max
 #elif OS_LINUX
@@ -339,8 +341,49 @@ clear_using_escape_codes(void) {
 
 #define clear() clear_using_escape_codes()
 
-static char
-read_byte(void) {
+#if 0
+static bool
+_read_console_char_with_timeout(char *c, int *n) {
+	bool ok = false;
+	
+	while (true) {
+		DWORD wres = WSAWaitForMultipleEvents(1, &stdin_handle, FALSE, 100, TRUE);
+		if (wres == WSA_WAIT_TIMEOUT) {
+			ok = true;
+			*n = 0;
+			break;
+		}
+		
+		if (wres == WSA_WAIT_EVENT_0) {
+			
+			INPUT_RECORD record;
+			DWORD numRead;
+			
+			if (ReadConsoleInput(GetStdHandle(STD_INPUT_HANDLE), &record, 1, &numRead)) {
+				assert(numRead > 0); // Because we're in the WSA_WAIT_EVENT_0 case.
+				
+				if (record.EventType == KEY_EVENT &&
+					record.Event.KeyEvent.bKeyDown) {
+					*c = record.Event.KeyEvent.uChar.AsciiChar;
+					*n = 1;
+					ok = true;
+					break;
+				} // else: just keep spinning, spinning, spinning...
+			} else {
+				// It's an error, break the loop without setting 'ok' to true.
+				break;
+			}
+		}
+	}
+	
+	return ok;
+}
+#endif
+
+static Editor_Key
+wait_for_key(void) {
+	
+#if 0
 	INPUT_RECORD rec = {0};
 	DWORD recn = 0;
 	BOOL peek_ok = PeekConsoleInput(stdin_handle, &rec, 1, &recn);
@@ -365,9 +408,106 @@ read_byte(void) {
 	} else {
 		assert(peek_ok); // Temporary
 	}
+#elif 0
 	
-	return c;
+	/*
+while (true) {
+  PeekConsoleInput(&rec, &nrec)
+if (nrec > 0 && rec.kind == KEY) break; // If there's one key event, break
 }
+
+ReadConsoleInput(&rec, &nrec);
+
+if rec.key == '\x1b' {
+while(true) {
+PeekConsoleInput(&rec, &nrec)
+if nrec == 0 break
+if rec.kind == KEY {
+seq[i++] = rec.key
+}
+}
+
+if seq[0] blah ...
+}
+*/
+	
+	INPUT_RECORD rec = {0};
+	DWORD nrec = 0;
+	while (true) {
+		if (PeekConsoleInput(stdin_handle, &rec, 1, &nrec)) {
+			if (nrec > 0 && rec.EventType == KEY_EVENT) break;
+		} else {
+			assert(0); // Temporary; TODO: What to do?
+		}
+	}
+	
+	if (ReadConsoleInput(stdin_handle, &rec, 1, &nrec)) {
+		
+	} else {
+		assert(0); // Temporary; TODO: What to do?
+	}
+	
+#else
+	
+	// With the help of:
+	//   https://stackoverflow.com/a/22310673
+	
+	INPUT_RECORD record = {0};
+	
+	bool ok = false;
+	while (true) {
+		int n = 0;
+		while (true) {
+			DWORD wres = WSAWaitForMultipleEvents(1, &stdin_handle, FALSE, 100, TRUE);
+			if (wres == WSA_WAIT_TIMEOUT) {
+				ok = true;
+				n = 0;
+				break;
+			}
+			
+			if (wres == WSA_WAIT_EVENT_0) {
+				
+				DWORD num_read = 0;
+				
+				if (ReadConsoleInput(GetStdHandle(STD_INPUT_HANDLE), &record, 1, &num_read)) {
+					assert(num_read > 0); // Because we're in the WSA_WAIT_EVENT_0 case.
+					
+					if (record.EventType == KEY_EVENT &&
+						record.Event.KeyEvent.bKeyDown) {
+						n = 1;
+						ok = true;
+						break;
+					} // else: just keep spinning, spinning, spinning...
+				} else {
+					// It's an error, break the loop without setting 'ok' to true.
+					break;
+				}
+			}
+		}
+		
+		if (!ok) { assert(0); }
+		if (n > 0) break;
+	}
+	
+	assert(record.EventType == KEY_EVENT);
+	
+	Editor_Key key = 0;
+	switch (record.Event.KeyEvent.wVirtualKeyCode) {
+		case VK_UP: key = Editor_Key_ARROW_UP;    break;
+		case VK_DOWN: key = Editor_Key_ARROW_DOWN;  break;
+		case VK_RIGHT: key = Editor_Key_ARROW_RIGHT; break;
+		case VK_LEFT: key = Editor_Key_ARROW_LEFT;  break;
+		
+		default: {
+			key = record.Event.KeyEvent.uChar.AsciiChar;
+		} break;
+	}
+	
+#endif
+	
+	return key;
+}
+
 
 static void
 console_write(u8 *data, i64 len) {
