@@ -1,6 +1,8 @@
 # fedit
  A simple terminal-based text editor in C.
 
+ **NOTE**: This project is WIP.
+
  It is based on [the kilo editor](https://github.com/antirez/kilo) by Salvatore Sanfilippo and [the tutorial series](https://viewsourcecode.org/snaptoken/kilo) by snaptoken.
 
  The Linux-specific code has been ported to Windows.
