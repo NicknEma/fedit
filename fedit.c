@@ -111,6 +111,7 @@
 #define cast(t) (t)
 #define array_count(a) (sizeof(a)/sizeof((a)[0]))
 #define allow_break() do { int __x__ = 0; (void)__x__; } while (0)
+#define panic(...) assert(0)
 
 typedef  uint8_t  u8;
 typedef uint16_t u16;
@@ -148,11 +149,16 @@ enum Editor_Key {
 	Editor_Key_ARROW_LEFT,
 	Editor_Key_ARROW_DOWN,
 	Editor_Key_ARROW_RIGHT,
+	Editor_Key_PAGE_UP,
+	Editor_Key_PAGE_DOWN,
+	Editor_Key_HOME,
+	Editor_Key_END,
 };
 typedef enum Editor_Key Editor_Key;
 
 typedef struct Editor_State Editor_State;
 struct Editor_State {
+	Size window_size;
 	Point cursor_position;
 };
 
@@ -497,6 +503,10 @@ if seq[0] blah ...
 		case VK_DOWN: key = Editor_Key_ARROW_DOWN;  break;
 		case VK_RIGHT: key = Editor_Key_ARROW_RIGHT; break;
 		case VK_LEFT: key = Editor_Key_ARROW_LEFT;  break;
+		case VK_PRIOR: key = Editor_Key_PAGE_UP; break;
+		case VK_NEXT: key = Editor_Key_PAGE_DOWN; break;
+		case VK_HOME: key = Editor_Key_HOME; break;
+		case VK_END: key = Editor_Key_END; break;
 		
 		default: {
 			key = record.Event.KeyEvent.uChar.AsciiChar;
@@ -727,11 +737,33 @@ wait_for_key(void) {
 			// It probabily is an escape code, so try to parse it.
 			
 			if (seq[0] == '[') {
+				if (isdigit(seq[1])) {
+					if (read(STDIN_FILENO, &seq[2], 1) == 1) {
+						if (seq[2] == '~') {
+							switch (seq[1]) {
+								case '1': key = Editor_Key_HOME; break;
+								case '4': key = Editor_Key_END; break;
+								case '5': key = Editor_Key_PAGE_UP; break;
+								case '6': key = Editor_Key_PAGE_DOWN; break;
+								case '7': key = Editor_Key_HOME; break;
+								case '8': key = Editor_Key_END; break;
+							}
+						}
+					}
+				} else {
+					switch (seq[1]) {
+						case 'A': key = Editor_Key_ARROW_UP;    break;
+						case 'B': key = Editor_Key_ARROW_DOWN;  break;
+						case 'C': key = Editor_Key_ARROW_RIGHT; break;
+						case 'D': key = Editor_Key_ARROW_LEFT;  break;
+						case 'H': key = Editor_Key_HOME; break;
+						case 'F': key = Editor_Key_END; break;
+					}
+				}
+			} else if (seq[0] == '0') {
 				switch (seq[1]) {
-					case 'A': key = Editor_Key_ARROW_UP;    break;
-					case 'B': key = Editor_Key_ARROW_DOWN;  break;
-					case 'C': key = Editor_Key_ARROW_RIGHT; break;
-					case 'D': key = Editor_Key_ARROW_LEFT;  break;
+					case 'H': key = Editor_Key_HOME; break;
+					case 'F': key = Editor_Key_END; break;
 				}
 			}
 		}
@@ -756,6 +788,37 @@ report_error(char *message) {
 	(void)message;
 }
 
+static void
+editor_move_cursor(Editor_Key key) {
+	
+	switch (key) {
+		case Editor_Key_ARROW_LEFT: {
+			if (state.cursor_position.x > 0) {
+				state.cursor_position.x -= 1;
+			}
+		} break;
+		case Editor_Key_ARROW_RIGHT: {
+			if (state.cursor_position.x < state.window_size.width - 1) {
+				state.cursor_position.x += 1;
+			}
+		} break;
+		case Editor_Key_ARROW_UP: {
+			if (state.cursor_position.y > 0) {
+				state.cursor_position.y -= 1;
+			}
+		} break;
+		case Editor_Key_ARROW_DOWN: {
+			if (state.cursor_position.y < state.window_size.height - 1) {
+				state.cursor_position.y += 1;
+			}
+		} break;
+		default: {
+			panic("Invalid switch case");
+		}
+	}
+	
+}
+
 int main(void) {
 	
 	before_main();
@@ -765,11 +828,8 @@ int main(void) {
 	logfile = fopen("log.txt", "w");
 	assert(logfile);
 	
-	Size size;
-	bool size_ok = query_window_size(&size);
+	bool size_ok = query_window_size(&state.window_size);
 	assert(size_ok);
-	
-	state.cursor_position.x = 10; // Temporary
 	
 	while (true) {
 		
@@ -780,14 +840,14 @@ int main(void) {
 			clear();
 			
 			// Temporary: draw a row
-			for (int x = 0; x < size.width; x += 1) {
+			for (int x = 0; x < state.window_size.width; x += 1) {
 				console_write(cast(u8 *) "~", 1);
 			}
 			
 			{
 				// Draw ~ for each row
 				int y;
-				for (y = 0; y < size.height - 1; y += 1) {
+				for (y = 0; y < state.window_size.height - 1; y += 1) {
 					console_write(cast(u8 *) "~\r\n", 3);
 				}
 				console_write(cast(u8 *) "~", 1);
@@ -814,22 +874,23 @@ int main(void) {
 			case Editor_Key_ARROW_LEFT:
 			case Editor_Key_ARROW_DOWN:
 			case Editor_Key_ARROW_RIGHT: {
-				
-				switch (key) {
-					case Editor_Key_ARROW_LEFT: {
-						state.cursor_position.x -= 1;
-					} break;
-					case Editor_Key_ARROW_RIGHT: {
-						state.cursor_position.x += 1;
-					} break;
-					case Editor_Key_ARROW_UP: {
-						state.cursor_position.y -= 1;
-					} break;
-					case Editor_Key_ARROW_DOWN: {
-						state.cursor_position.y += 1;
-					} break;
+				editor_move_cursor(key);
+			} break;
+			
+			case Editor_Key_PAGE_UP:
+			case Editor_Key_PAGE_DOWN: {
+				Editor_Key direction = key == Editor_Key_PAGE_UP ? Editor_Key_ARROW_UP : Editor_Key_ARROW_DOWN;
+				for (int step = 0; step < state.window_size.height; step += 1) {
+					editor_move_cursor(direction);
 				}
-				
+			} break;
+			
+			case Editor_Key_HOME: {
+				state.cursor_position.x = 0;
+			} break;
+			
+			case Editor_Key_END: {
+				state.cursor_position.x = state.window_size.width - 1;
 			} break;
 		}
 	}
