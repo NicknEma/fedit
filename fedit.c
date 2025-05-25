@@ -216,6 +216,11 @@ static bool
 query_cursor_position(Point *position) {
 	bool ok = false;
 	
+	// TODO: When we set the cursor position with the escape codes, the position is 1-based
+	// When we query it with this API, it is 0-based.
+	// Change this to use escape codes like the Linux version.
+	
+#if 0
 	CONSOLE_SCREEN_BUFFER_INFO info = {0};
 	if (GetConsoleScreenBufferInfo(stdout_handle, &info)) {
 		position->x = info.dwCursorPosition.X;
@@ -227,7 +232,39 @@ query_cursor_position(Point *position) {
 		
 		assert(0); // Temporary
 	}
+#else
 	
+	// @Copypaste from the Linux version: the only differences are the system API calls
+	
+	DWORD ww = 0;
+	BOOL wok = WriteConsole(stdout_handle, "\x1b[6n", 4, &ww, NULL); // n command = Device Status Report; arg 6 = cursor position
+	if (wok && ww == 4) {
+		char buf[32];
+		unsigned int i = 0;
+		
+		while (i < sizeof(buf) - 1) {
+			DWORD rr = 0;
+			if (!ReadConsole(stdin_handle, &buf[i], 1, &rr, NULL)) break;
+			if (buf[i] == 'R') break;
+			i += 1;
+		}
+		
+		buf[i] = '\0';
+		
+		if (buf[0] == '\x1b' || buf[1] == '[') { // Make sure the response is an escape sequence
+			int x = 0, y = 0;
+			int sscanf_result = sscanf(&buf[2], "%d;%d", &y, &x); // Parse the report; the first number is the line (so the y) and the second is the column (so the x)
+			// The position is 1-based
+			
+			if (sscanf_result == 2) {
+				position->x = x;
+				position->y = y;
+				ok = true;
+			}
+		}
+	}
+	
+#endif
 	return ok;
 }
 
@@ -381,12 +418,11 @@ query_cursor_position(Point *position) {
 		}
 		
 		buf[i] = '\0';
-		// printf("\r\n&buf[1]: '%s'\r\n", &buf[1]);
 		
 		if (buf[0] == '\x1b' || buf[1] == '[') { // Make sure the response is an escape sequence
 			int x = 0, y = 0;
 			int sscanf_result = sscanf(&buf[2], "%d;%d", &y, &x); // Parse the report; the first number is the line (so the y) and the second is the column (so the x)
-			// Is it 0-based or 1-based?
+			// The position is 1-based
 			
 			if (sscanf_result == 2) {
 				position->x = x;
@@ -522,7 +558,6 @@ report_error(char *message) {
 }
 
 int main(void) {
-	
 	
 	before_main();
 	enable_raw_mode();
