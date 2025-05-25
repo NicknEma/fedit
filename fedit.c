@@ -153,6 +153,7 @@ enum Editor_Key {
 	Editor_Key_PAGE_DOWN,
 	Editor_Key_HOME,
 	Editor_Key_END,
+	Editor_Key_DELETE,
 };
 typedef enum Editor_Key Editor_Key;
 
@@ -507,6 +508,7 @@ if seq[0] blah ...
 		case VK_NEXT: key = Editor_Key_PAGE_DOWN; break;
 		case VK_HOME: key = Editor_Key_HOME; break;
 		case VK_END: key = Editor_Key_END; break;
+		case VK_DELETE: key = Editor_Key_DELETE; break;
 		
 		default: {
 			key = record.Event.KeyEvent.uChar.AsciiChar;
@@ -742,6 +744,7 @@ wait_for_key(void) {
 						if (seq[2] == '~') {
 							switch (seq[1]) {
 								case '1': key = Editor_Key_HOME; break;
+								case '3': key = Editor_Key_DELETE; break;
 								case '4': key = Editor_Key_END; break;
 								case '5': key = Editor_Key_PAGE_UP; break;
 								case '6': key = Editor_Key_PAGE_DOWN; break;
