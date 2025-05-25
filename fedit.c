@@ -172,6 +172,8 @@ static FILE *logfile;
 
 //- Editor generic functions
 
+static void editor_move_cursor(Editor_Key key);
+
 //- Editor platform-specific functions
 
 static void clear(void);
@@ -253,6 +255,7 @@ query_cursor_position(Point *position) {
 	// Change this to use escape codes like the Linux version.
 	
 #if 0
+	
 	CONSOLE_SCREEN_BUFFER_INFO info = {0};
 	if (GetConsoleScreenBufferInfo(stdout_handle, &info)) {
 		position->x = info.dwCursorPosition.X;
@@ -264,6 +267,7 @@ query_cursor_position(Point *position) {
 		
 		assert(0); // Temporary
 	}
+	
 #else
 	
 	// @Copypaste from the Linux version: the only differences are the system API calls
@@ -297,6 +301,7 @@ query_cursor_position(Point *position) {
 	}
 	
 #endif
+	
 	return ok;
 }
 
@@ -316,29 +321,6 @@ query_window_size(Size *size) {
 	return ok;
 }
 
-static void
-clear_using_console_api(void) {
-    COORD topLeft  = { 0, 0 };
-    HANDLE console = GetStdHandle(STD_OUTPUT_HANDLE);
-    CONSOLE_SCREEN_BUFFER_INFO screen;
-    DWORD written;
-	
-    GetConsoleScreenBufferInfo(console, &screen);
-    FillConsoleOutputCharacterA(
-								console, ' ', screen.dwSize.X * screen.dwSize.Y, topLeft, &written
-								);
-    FillConsoleOutputAttribute(
-							   console, FOREGROUND_GREEN | FOREGROUND_RED | FOREGROUND_BLUE,
-							   screen.dwSize.X * screen.dwSize.Y, topLeft, &written
-							   );
-    SetConsoleCursorPosition(console, topLeft);
-}
-
-static void
-clear_using_escape_codes(void) {
-	printf("\033[H\033[J");
-}
-
 // NOTE: Clearing the screen in Windows is weird, because the normal escape code doesn't work,
 // so you either have to use the alternative one:
 //   https://stackoverflow.com/questions/48612106/windows-console-esc2j-doesnt-really-clear-the-screen
@@ -346,7 +328,31 @@ clear_using_escape_codes(void) {
 //   https://stackoverflow.com/questions/6486289/how-to-clear-the-console-in-c
 //   https://stackoverflow.com/questions/5866529/how-do-we-clear-the-console-in-assembly/5866648#5866648
 
-#define clear() clear_using_escape_codes()
+#define WIN32_CLEAR_USING_ESCAPE_CODES 1
+
+static void
+clear(void) {
+	
+#if WIN32_CLEAR_USING_ESCAPE_CODES
+	
+	printf("\033[H\033[J");
+	
+#else
+	
+    CONSOLE_SCREEN_BUFFER_INFO info;
+    GetConsoleScreenBufferInfo(stdout_handle, &info);
+	
+    DWORD written = 0;
+	COORD top_left = {0, 0};
+    FillConsoleOutputCharacterA(stdout_handle, ' ', info.dwSize.X * info.dwSize.Y, top_left, &written);
+	
+    FillConsoleOutputAttribute(stdout_handle, FOREGROUND_GREEN | FOREGROUND_RED | FOREGROUND_BLUE,
+							   info.dwSize.X * info.dwSize.Y, top_left, &written);
+    SetConsoleCursorPosition(stdout_handle, top_left);
+	
+#endif
+	
+}
 
 #if 0
 static bool
@@ -536,15 +542,59 @@ console_write(u8 *data, i64 len) {
 
 #elif OS_LINUX
 
+//- Linux-specific types
+
 typedef struct termios termios;
+typedef struct winsize winsize;
+
+//- Linux-specific global variables
 
 static termios original_mode;
+static int wsl_mode;
 
 //- Linux-specific initialization/finalization
 
+// Code for detecting wether we are in a WSL or in actual Linux:
+//   https://github.com/scivision/detect-windows-subsystem-for-linux
+
+static bool
+_wsl_detect_str_ends_with(const char *s, const char *suffix) {
+	/* https://stackoverflow.com/a/41652727 */
+    size_t slen = strlen(s);
+    size_t suffix_len = strlen(suffix);
+	
+    return suffix_len <= slen && !strcmp(s + slen - suffix_len, suffix);
+}
+
+static int
+_wsl_detect(void) {
+	// -1: Windows, not WSL
+	//  0: Actual Linux
+	//  1: WSL 1
+	//  2: WSL 2
+	int result = -1;
+	
+#if __has_include(<sys/utsname.h>) // See if it makes sense to check for the header
+	struct utsname buf;
+	if (uname(&buf) == 0) {
+		if (strcmp(buf.sysname, "Linux") != 0) {
+			result = 0;
+		} else if (_wsl_detect_str_ends_with(buf.release, "microsoft-standard-WSL2")) {
+			result = 2;
+		} else if (_wsl_detect_str_ends_with(buf.release, "-Microsoft")) {
+			result = 1;
+		} else {
+			result = 0;
+		}
+	}
+#endif
+	
+	return result;
+}
+
 static void
 before_main(void) {
-	;
+	wsl_mode = _wsl_detect();
 }
 
 static void
@@ -580,8 +630,6 @@ disable_raw_mode(void) {
 }
 
 //- Linux-specific console functions
-
-typedef struct winsize winsize;
 
 static bool
 query_cursor_position(Point *position) {
@@ -646,45 +694,8 @@ query_window_size(Size *size) {
 	return ok;
 }
 
-// https://github.com/scivision/detect-windows-subsystem-for-linux
-
-static bool
-_wsl_detect_str_ends_with(const char *s, const char *suffix) {
-	/* https://stackoverflow.com/a/41652727 */
-    size_t slen = strlen(s);
-    size_t suffix_len = strlen(suffix);
-	
-    return suffix_len <= slen && !strcmp(s + slen - suffix_len, suffix);
-}
-
-int _wsl_detect(void) {
-	// -1: Windows, not WSL
-	//  0: Actual Linux
-	//  1: WSL 1
-	//  2: WSL 2
-	int result = -1;
-	
-#if __has_include(<sys/utsname.h>) // See if it makes sense to check for the header
-	struct utsname buf;
-	if (uname(&buf) == 0) {
-		if (strcmp(buf.sysname, "Linux") != 0) {
-			result = 0;
-		} else if (_wsl_detect_str_ends_with(buf.release, "microsoft-standard-WSL2")) {
-			result = 2;
-		} else if (_wsl_detect_str_ends_with(buf.release, "-Microsoft")) {
-			result = 1;
-		} else {
-			result = 0;
-		}
-	}
-#endif
-	
-	return result;
-}
-
 static void
 clear(void) {
-	int wsl_mode = _wsl_detect(); // TODO: Do this in before_main()
 	
 #if 0
 	// This was a hack to fix the fact that the normal escape sequence to clear the screen doesn't work
