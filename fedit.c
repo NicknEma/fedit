@@ -208,6 +208,7 @@ write_buffer_append(Write_Buffer *buffer, String s) {
 		
 		write_buffer_flush(buffer);
 		memcpy(buffer->data, s.data + available, s.len - available);
+		buffer->len += (s.len - available);
 	}
 }
 
