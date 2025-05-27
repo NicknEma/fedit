@@ -72,8 +72,6 @@
 # define WIN32_LEAN_AND_MEAN
 # include <windows.h>
 # include <winsock2.h>
-# undef min
-# undef max
 #elif OS_LINUX
 # include <termios.h>
 # include <unistd.h>
@@ -243,10 +241,19 @@ enum Editor_Key {
 };
 typedef enum Editor_Key Editor_Key;
 
+typedef struct Editor_Line Editor_Line;
+struct Editor_Line {
+	i64  len;
+	u8  *data;
+};
+
 typedef struct Editor_State Editor_State;
 struct Editor_State {
 	Size window_size;
 	Point cursor_position;
+	
+	Editor_Line *lines;
+	i64 line_count;
 };
 
 //- Editor global variables
@@ -259,6 +266,7 @@ static FILE *logfile;
 //- Editor generic functions
 
 static void editor_move_cursor(Editor_Key key);
+static void editor_hardcode_initial_contents();
 
 //- Editor platform-specific functions
 
@@ -296,6 +304,8 @@ enable_raw_mode(void) {
 	if (GetConsoleMode(stdin_handle, &original_stdin_mode)) {
 		DWORD mode = original_stdin_mode;
 		mode &= ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT);
+		
+		// TODO: Find a way to disable mouse scrolling
 		
 		if (!SetConsoleMode(stdin_handle, mode)) {
 			int n = GetLastError();
@@ -583,6 +593,10 @@ if seq[0] blah ...
 						ok = true;
 						break;
 					} // else: just keep spinning, spinning, spinning...
+					
+					// TODO: In case of a window resize, redraw everything?
+					// TODO: If mouse scrolling can't be disable, redraw everything also when
+					// mouse scrolls?
 				} else {
 					// It's an error, break the loop without setting 'ok' to true.
 					break;
@@ -912,6 +926,18 @@ report_error(char *message) {
 #endif
 
 static void
+editor_hardcode_initial_contents(void) {
+	String line_text = string_from_lit("Hello, world!");
+	
+	state.line_count = 1;
+	state.lines = malloc(sizeof(Editor_Line) * state.line_count);
+	
+	state.lines[0].len = line_text.len;
+	state.lines[0].data = malloc(line_text.len);
+	memcpy(state.lines[0].data, line_text.data, line_text.len);
+}
+
+static void
 editor_move_cursor(Editor_Key key) {
 	
 	switch (key) {
@@ -953,6 +979,8 @@ int main(void) {
 	bool size_ok = query_window_size(&state.window_size);
 	assert(size_ok);
 	
+	editor_hardcode_initial_contents();
+	
 	Write_Buffer screen_buffer;
 	u8 screen_buffer_data[1024];
 	write_buffer_init(&screen_buffer, screen_buffer_data, sizeof(screen_buffer_data));
@@ -964,20 +992,34 @@ int main(void) {
 			
 			write_buffer_append(&screen_buffer, get_clear_string()); // Clear screen
 			
+#if 0
 			// Temporary: draw a row
 			// -1 because we don't print in the last column
 			for (int x = 0; x < state.window_size.width - 1; x += 1) {
 				write_buffer_append(&screen_buffer, string_from_lit("~"));
 			}
 			write_buffer_append(&screen_buffer, string_from_lit("\r\n"));
+#endif
 			
 			{
 				// Draw ~ for each row
-				int y;
-				for (y = 0; y < state.window_size.height - 1; y += 1) {
-					write_buffer_append(&screen_buffer, string_from_lit("~\r\n"));
+				for (int y = 0; y < state.window_size.height; y += 1) {
+					if (y >= state.line_count) {
+						// TODO: Display the welcome message
+						
+						write_buffer_append(&screen_buffer, string_from_lit("~"));
+					} else {
+						i64 to_write = min(state.lines[y].len, state.window_size.width);
+						write_buffer_append(&screen_buffer, string(state.lines[y].data, to_write));
+					}
+					
+					// This doesn't work in Windows terminals, we have to clear the whole screen
+					// using the special code because Windows is a special kid.
+					// write_buffer_append(&screen_buffer, string_from_lit("\x1b[K")); // Clear row
+					if (y < state.window_size.height - 1) {
+						write_buffer_append(&screen_buffer, string_from_lit("\r\n"));
+					}
 				}
-				write_buffer_append(&screen_buffer, string_from_lit("~"));
 			}
 			
 			write_buffer_append(&screen_buffer, esc("H")); // Reset cursor
