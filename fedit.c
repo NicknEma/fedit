@@ -135,12 +135,87 @@ struct Point {
 	i32 y;
 };
 
+typedef struct String String;
+struct String {
+	i64  len;
+	u8  *data;
+};
+
+#define string_lit_expand(s)   s, (sizeof(s)-1)
+#define string_expand(s)       cast(int)(s).len, (s).data
+
+#define string_from_lit(s)     string(cast(u8 *)s, sizeof(s)-1)
+#define string_from_cstring(s) string(cast(u8 *)s, strlen(s))
+
+static String
+string(u8 *data, i64 len) {
+	String result = {
+		.data = data,
+		.len  = len,
+	};
+	return result;
+}
+
+////////////////////////////////
+//~ Console output helpers
+
+//- Console types
+
+typedef struct Write_Buffer Write_Buffer;
+struct Write_Buffer {
+	i64  cap;
+	i64  len;
+	u8  *data;
+};
+
+//- Console platform-specific functions
+
+static void write_console_unbuffered(String s);
+
+//- Console generic functions
+
+static void write_buffer_init(Write_Buffer *buffer, u8 *data, i64 cap);
+static void write_buffer_append(Write_Buffer *buffer, String s);
+static void write_buffer_flush(Write_Buffer *buffer);
+
+static void
+write_buffer_init(Write_Buffer *buffer, u8 *data, i64 cap) {
+	buffer->data = data;
+	buffer->cap  = cap;
+	buffer->len  = 0;
+}
+
+static void
+write_buffer_append(Write_Buffer *buffer, String s) {
+	assert(buffer->data); // Not initialized
+	
+	i64 available = buffer->cap - buffer->len;
+	i64 to_copy = min(available, s.len);
+	memcpy(buffer->data + buffer->len, s.data, to_copy);
+	buffer->len += to_copy;
+	
+	if (s.len > available) {
+		assert(buffer->len == buffer->cap);
+		
+		write_buffer_flush(buffer);
+		memcpy(buffer->data, s.data + available, s.len - available);
+	}
+}
+
+static void
+write_buffer_flush(Write_Buffer *buffer) {
+	write_console_unbuffered(string(buffer->data, buffer->len));
+	buffer->len = 0;
+}
+
 ////////////////////////////////
 //~ Editor
 
 #define ESCAPE_PREFIX "\x1b["
 
 #define CTRL_KEY(k) ((k) & 0x1f)
+
+#define esc(code) string_from_lit(ESCAPE_PREFIX code)
 
 //- Editor types
 
@@ -177,6 +252,7 @@ static void editor_move_cursor(Editor_Key key);
 //- Editor platform-specific functions
 
 static void clear(void);
+static String get_clear_string(void);
 
 static bool query_window_size(Size *size);
 static bool query_cursor_position(Point *position);
@@ -335,7 +411,7 @@ clear(void) {
 	
 #if WIN32_CLEAR_USING_ESCAPE_CODES
 	
-	printf("\033[H\033[J");
+	write_console_unbuffered(get_clear_string());
 	
 #else
 	
@@ -352,6 +428,11 @@ clear(void) {
 	
 #endif
 	
+}
+
+static String
+get_clear_string(void) {
+	return string_from_lit("\033[H\033[J");
 }
 
 #if 0
@@ -526,12 +607,12 @@ if seq[0] blah ...
 	return key;
 }
 
-
 static void
-console_write(u8 *data, i64 len) {
-	assert(cast(i64)cast(u32)len == len); // If false, the length is not supported
+write_console_unbuffered(String s) {
+	assert(cast(i64)cast(u32)s.len == s.len); // If false, the length is not supported
+	
 	DWORD len_written = 0;
-	BOOL ok = WriteConsole(stdout_handle, data, cast(u32)len, &len_written, NULL);
+	BOOL ok = WriteConsole(stdout_handle, s.data, cast(u32)s.len, &len_written, NULL);
 	if (!ok) {
 		int n = GetLastError();
 		(void)n;
@@ -696,6 +777,12 @@ query_window_size(Size *size) {
 
 static void
 clear(void) {
+	write_console_unbuffered(get_clear_string());
+}
+
+static String
+get_clear_string(void) {
+	String result = {0};
 	
 #if 0
 	// This was a hack to fix the fact that the normal escape sequence to clear the screen doesn't work
@@ -705,12 +792,16 @@ clear(void) {
 	switch (wsl_mode) {
 		case 1:
 		case 2: {
-			printf("\033[H\033[J");
+			// printf("\033[H\033[J");
+			
+			result = string(string_from_lit("\033[H\033[J"));
 		} break;
 		
 		case 0: {
-			printf("\x1b[2J"); // Clear screen
-			printf("\x1b[H"); // Reposition cursor
+			// write_console_unbuffered(esc("2J")); // Clear screen
+			// write_console_unbuffered(esc("H")); // Reposition cursor
+			
+			result = string(string_from_lit("\x1b2J\x1bH"));
 		} break;
 		
 		default: assert(0);
@@ -718,9 +809,13 @@ clear(void) {
 #else
 	(void)wsl_mode;
 	
-	printf("\x1b[2J"); // Clear screen
-	printf("\x1b[H"); // Reposition cursor
+	// write_console_unbuffered(esc("2J")); // Clear screen
+	// write_console_unbuffered(esc("H")); // Reposition cursor
+	
+	result = string(string_from_lit("\x1b2J\x1bH"));
 #endif
+	
+	return result;
 }
 
 static Editor_Key
@@ -787,12 +882,14 @@ wait_for_key(void) {
 }
 
 static void
-console_write(u8 *data, i64 len) {
-	write(STDOUT_FILENO, data, len);
+write_console_unbuffered(String s) {
+	int nwrite = write(STDOUT_FILENO, s.data, s.len);
+	(void)nwrite;
 }
 
 #endif
 
+#if 0
 static void
 report_error(char *message) {
 	console_write(cast(u8 *) "\x1b[2J", 4); // Clear screen
@@ -801,6 +898,7 @@ report_error(char *message) {
 	// fprintf(stderr, ...);
 	(void)message;
 }
+#endif
 
 static void
 editor_move_cursor(Editor_Key key) {
@@ -838,51 +936,53 @@ int main(void) {
 	before_main();
 	enable_raw_mode();
 	
-	
 	logfile = fopen("log.txt", "w");
 	assert(logfile);
 	
 	bool size_ok = query_window_size(&state.window_size);
 	assert(size_ok);
 	
+	Write_Buffer screen_buffer;
+	u8 screen_buffer_data[1024];
+	write_buffer_init(&screen_buffer, screen_buffer_data, sizeof(screen_buffer_data));
+	
 	while (true) {
 		
-		// Prepare screen
 		{
-			console_write(cast(u8 *) "\x1b[?25l", 6); // Hide cursor
+			write_buffer_append(&screen_buffer, esc("?25l")); // Hide cursor
 			
-			clear();
+			write_buffer_append(&screen_buffer, get_clear_string()); // Clear screen
 			
 			// Temporary: draw a row
 			// -1 because we don't print in the last column
 			for (int x = 0; x < state.window_size.width - 1; x += 1) {
-				console_write(cast(u8 *) "~", 1);
+				write_buffer_append(&screen_buffer, string_from_lit("~"));
 			}
-			console_write(cast(u8 *) "\r\n", 2);
+			write_buffer_append(&screen_buffer, string_from_lit("\r\n"));
 			
 			{
 				// Draw ~ for each row
 				int y;
 				for (y = 0; y < state.window_size.height - 1; y += 1) {
-					console_write(cast(u8 *) "~\r\n", 3);
+					write_buffer_append(&screen_buffer, string_from_lit("~\r\n"));
 				}
-				console_write(cast(u8 *) "~", 1);
+				write_buffer_append(&screen_buffer, string_from_lit("~"));
 			}
 			
-			console_write(cast(u8 *) "\x1b[H", 3); // Reset cursor
+			write_buffer_append(&screen_buffer, esc("H")); // Reset cursor
 			
 			// Move cursor
 			char buf[32] = {0};
 			snprintf(buf, sizeof(buf), "\x1b[%d;%dH", state.cursor_position.y + 1, state.cursor_position.x + 1);
-			console_write(cast(u8 *) buf, strlen(buf));
+			write_buffer_append(&screen_buffer, string_from_cstring(buf));
 			
-			console_write(cast(u8 *) "\x1b[?25h", 6); // Show cursor
+			write_buffer_append(&screen_buffer, esc("?25h")); // Show cursor
+			
+			write_buffer_flush(&screen_buffer);
 		}
-		
 		
 		size_ok = query_window_size(&state.window_size);
 		assert(size_ok);
-		
 		
 		Editor_Key key = wait_for_key();
 		switch (key) {
