@@ -111,6 +111,44 @@
 #undef max
 #endif
 
+static void *alloc_safe(size_t size);
+
+static void *
+alloc_safe(size_t size) {
+	void *result = malloc(size);
+	assert(result);
+	return result;
+}
+
+/////////////////
+//~ fsize
+
+static size_t fsize(FILE *fp);
+
+// Sets EBADF if fp is not a seekable stream
+// EINVAL if fp was NULL
+static size_t
+fsize(FILE *fp) {
+	size_t fs = 0;
+	
+	if (fp) {
+		fseek(fp, 0L, SEEK_END);
+		
+		if (errno == 0) {
+			fs = ftell(fp);
+			
+			// If fseek succeeded before, it means that fp was
+			// a seekable stream, so we don't check the error again.
+			
+			fseek(fp, 0L, SEEK_SET);
+		}
+	} else {
+		errno = EINVAL;
+	}
+	
+	return fs;
+}
+
 ////////////////////////////////
 //~ Base
 
@@ -121,6 +159,50 @@
 
 #define min(a, b) ((a) < (b) ? (a) : (b))
 #define max(a, b) ((a) > (b) ? (a) : (b))
+
+//- Linked list helpers
+
+#define check_null(p) ((p)==0)
+#define set_null(p) ((p)=0)
+
+#define stack_push_n(f,n,next) ((n)->next=(f),(f)=(n))
+#define stack_pop_nz(f,next,zchk) (zchk(f)?0:((f)=(f)->next))
+
+#define queue_push_nz(f,l,n,next,zchk,zset) (zchk(f)?\
+(((f)=(l)=(n)), zset((n)->next)):\
+((l)->next=(n),(l)=(n),zset((n)->next)))
+#define queue_push_front_nz(f,l,n,next,zchk,zset) (zchk(f) ? (((f) = (l) = (n)), zset((n)->next)) :\
+((n)->next = (f)), ((f) = (n)))
+#define queue_pop_nz(f,l,next,zset) ((f)==(l)?\
+(zset(f),zset(l)):\
+((f)=(f)->next))
+
+#define dll_insert_npz(f,l,p,n,next,prev,zchk,zset) \
+(zchk(f) ? (((f) = (l) = (n)), zset((n)->next), zset((n)->prev)) :\
+zchk(p) ? (zset((n)->prev), (n)->next = (f), (zchk(f) ? (0) : ((f)->prev = (n))), (f) = (n)) :\
+((zchk((p)->next) ? (0) : (((p)->next->prev) = (n))), (n)->next = (p)->next, (n)->prev = (p), (p)->next = (n),\
+((p) == (l) ? (l) = (n) : (0))))
+#define dll_push_back_npz(first,last,elem,next_ident,prev_ident,zero_check,zero_set) dll_insert_npz(first,last,last,elem,next_ident,prev_ident,zero_check,zero_set)
+#define dll_remove_npz(f,l,n,next,prev,zchk,zset) (((f)==(n))?\
+((f)=(f)->next, (zchk(f) ? (zset(l)) : zset((f)->prev))):\
+((l)==(n))?\
+((l)=(l)->prev, (zchk(l) ? (zset(f)) : zset((l)->next))):\
+((zchk((n)->next) ? (0) : ((n)->next->prev=(n)->prev)),\
+(zchk((n)->prev) ? (0) : ((n)->prev->next=(n)->next))))
+
+#define stack_push(f,n)           stack_push_n(f,n,next)
+#define stack_pop(f)              stack_pop_nz(f,next,check_null)
+
+#define queue_push(f,l,n)         queue_push_nz(f,l,n,next,check_null,set_null)
+#define queue_push_front(f,l,n)   queue_push_front_nz(f,l,n,next,check_null,set_null)
+#define queue_pop(f,l)            queue_pop_nz(f,l,next,set_null)
+
+#define dll_push_back(f,l,n)      dll_push_back_npz(f,l,n,next,prev,check_null,set_null)
+#define dll_push_front(f,l,n)     dll_push_back_npz(l,f,n,prev,next,check_null,set_null)
+#define dll_insert(f,l,p,n)       dll_insert_npz(f,l,p,n,next,prev,check_null,set_null)
+#define dll_remove(f,l,n)         dll_remove_npz(f,l,n,next,prev,check_null,set_null)
+
+//- Basic types
 
 typedef  uint8_t  u8;
 typedef uint16_t u16;
@@ -144,6 +226,12 @@ struct Point {
 	i32 y;
 };
 
+typedef struct SliceU8 SliceU8;
+struct SliceU8 {
+	i64  len;
+	u8  *data;
+};
+
 typedef struct String String;
 struct String {
 	i64  len;
@@ -162,6 +250,93 @@ string(u8 *data, i64 len) {
 		.data = data,
 		.len  = len,
 	};
+	return result;
+}
+
+static char *
+cstring_from_string(String s) {
+	// TODO: Arenas
+	
+	char *result = alloc_safe((s.len + 1) * sizeof(char));
+	memcpy(result, s.data, s.len);
+	result[s.len] = 0;
+	return result;
+}
+
+static u64
+round_up_to_multiple_of_u64(u64 n, u64 r) {
+    u64 result;
+    
+    result = r - 1;
+    result = n + result;
+    result = result / r;
+    result = result * r;
+    
+    return result;
+}
+
+static i64
+round_up_to_multiple_of_i64(i64 n, i64 r) {
+    i64 result;
+    
+    result = r - 1;
+    result = n + result;
+    result = result / r;
+    result = result * r;
+    
+    return result;
+}
+
+////////////////////////////////
+//~ File IO
+
+//- File IO types
+
+typedef struct Read_File_Result Read_File_Result;
+struct Read_File_Result {
+	SliceU8 contents;
+	bool ok;
+};
+
+//- File IO functions
+
+static Read_File_Result read_file(String file_name);
+
+static Read_File_Result
+read_file(String file_name) {
+	Read_File_Result result = {0};
+	
+	char *file_name_ = cstring_from_string(file_name);
+	assert(file_name_); // TODO: Arenas
+	
+	FILE *handle = fopen(file_name_, "rb");
+	if (handle) {
+		errno = 0;
+		size_t size = fsize(handle);
+		if (errno == 0) {
+			result.contents.len  = size;
+			result.contents.data = malloc(size * sizeof(u8)); // Caller is responsible for freeing. TODO: Arenas
+			assert(result.contents.data); // TODO: Switch to an if-else?
+			
+			i64 read_amount  = fread(result.contents.data,
+									 sizeof(u8),
+									 result.contents.len,
+									 handle);
+			if (read_amount == result.contents.len || feof(handle)) {
+				result.ok = true;
+			} else {
+				// TODO: something
+			}
+		} else {
+			// TODO: something
+		}
+		fclose(handle);
+	} else {
+		// TODO: something
+	}
+	
+	free(file_name_);
+	
 	return result;
 }
 
@@ -227,6 +402,9 @@ write_buffer_flush(Write_Buffer *buffer) {
 
 #define esc(code) string_from_lit(ESCAPE_PREFIX code)
 
+#define EDITOR_DEFAULT_LINE_SIZE 64
+#define EDITOR_DEFAULT_PAGE_SIZE 64
+
 //- Editor types
 
 enum Editor_Key {
@@ -244,8 +422,21 @@ typedef enum Editor_Key Editor_Key;
 
 typedef struct Editor_Line Editor_Line;
 struct Editor_Line {
+	Editor_Line *next;
+	
 	i64  len;
+	i64  cap;
 	u8  *data;
+};
+
+typedef struct Editor_Page Editor_Page;
+struct Editor_Page {
+	Editor_Page *next;
+	Editor_Page *prev;
+	
+	Editor_Line *lines;
+	i64 line_count;
+	i64 line_capacity;
 };
 
 typedef struct Editor_State Editor_State;
@@ -253,8 +444,18 @@ struct Editor_State {
 	Size window_size;
 	Point cursor_position;
 	
-	Editor_Line *lines;
-	i64 line_count;
+	Editor_Page *first_page;
+	Editor_Page *last_page;
+	i64 page_count;
+	
+	Editor_Page *first_free_page;
+	Editor_Line *first_free_line;
+};
+
+typedef struct Editor_Relative_Line Editor_Relative_Line;
+struct Editor_Relative_Line {
+	Editor_Page *page;
+	i64 line;
 };
 
 //- Editor global variables
@@ -267,7 +468,35 @@ static FILE *logfile;
 //- Editor generic functions
 
 static void editor_move_cursor(Editor_Key key);
-static void editor_hardcode_initial_contents();
+static void editor_hardcode_initial_contents(void);
+static void editor_init_buffer(SliceU8 contents);
+static void editor_load_file(String file_name);
+
+static Editor_Relative_Line editor_relative_from_absolute_line(i64 absolute_line);
+
+static Editor_Relative_Line
+editor_relative_from_absolute_line(i64 absolute_line) {
+	Editor_Relative_Line result = {0};
+	
+	i64 line_remaining = absolute_line;
+	
+	Editor_Page *page = state.first_page;
+	i64 page_index = 0;
+	while (page) {
+		if (line_remaining < page->line_count) {
+			result.page = page;
+			result.line = line_remaining;
+			break;
+		}
+		
+		line_remaining -= page->line_count;
+		
+		page_index += 1;
+		page = page->next;
+	}
+	
+	return result;
+}
 
 //- Editor platform-specific functions
 
@@ -929,13 +1158,81 @@ report_error(char *message) {
 static void
 editor_hardcode_initial_contents(void) {
 	String line_text = string_from_lit("Hello, world!");
+	SliceU8 contents = { // TODO: Conversion function
+		.data = line_text.data,
+		.len  = line_text.len,
+	};
 	
-	state.line_count = 1;
-	state.lines = malloc(sizeof(Editor_Line) * state.line_count);
+	editor_init_buffer(contents);
+}
+
+static void
+editor_init_buffer(SliceU8 contents) {
+	// NOTE: !!!!! For now, overwrite previously loaded file.
 	
-	state.lines[0].len = line_text.len;
-	state.lines[0].data = malloc(line_text.len);
-	memcpy(state.lines[0].data, line_text.data, line_text.len);
+	Editor_Page *page = NULL;
+	
+	page = alloc_safe(sizeof(Editor_Page));
+	page->line_count = 0;
+	page->line_capacity = EDITOR_DEFAULT_PAGE_SIZE;
+	page->lines = alloc_safe(page->line_capacity * sizeof(Editor_Line));
+	page->next = NULL;
+	dll_push_back(state.first_page, state.last_page, page);
+	
+	// TODO: For now let's pretend that every file is LF
+	
+	i64 line_start = 0;
+	i64 line_end = 0;
+	for (i64 byte_index = 0; byte_index < contents.len; byte_index += 1) {
+		if (contents.data[byte_index] == '\n') {
+			line_end = byte_index;
+			
+			// Fill line
+			Editor_Line *line = NULL;
+			{
+				if (page->line_count >= page->line_capacity) {
+					page = alloc_safe(sizeof(Editor_Page));
+					page->line_count = 0;
+					page->line_capacity = EDITOR_DEFAULT_PAGE_SIZE;
+					page->lines = alloc_safe(page->line_capacity * sizeof(Editor_Line));
+					page->next = NULL;
+					dll_push_back(state.first_page, state.last_page, page);
+				}
+				
+				line = &page->lines[page->line_count];
+				page->line_count += 1;
+			}
+			
+			line->next = NULL;
+			
+			i64 line_len = line_end - line_start; // NOTE: This could be 0. Is alloc_safe(0) well-defined?
+			i64 line_size = round_up_to_multiple_of_i64(line_len, EDITOR_DEFAULT_LINE_SIZE);
+			line->data = malloc(line_size * sizeof(u8));
+			if (line_len > 0) { assert(line->data); }
+			
+			line->len = line_len;
+			line->cap = line_size;
+			memcpy(line->data, contents.data + line_start, line_len);
+			
+			// Prepare for next iteration
+			line_start = line_end + 1;
+			
+			allow_break();
+		}
+	}
+	
+	allow_break();
+}
+
+static void
+editor_load_file(String file_name) {
+	Read_File_Result rf_result = read_file(file_name);
+	if (rf_result.ok) {
+		editor_init_buffer(rf_result.contents);
+		free(rf_result.contents.data);
+	} else {
+		// TODO: Something
+	}
 }
 
 static void
@@ -980,7 +1277,8 @@ int main(void) {
 	bool size_ok = query_window_size(&state.window_size);
 	assert(size_ok);
 	
-	editor_hardcode_initial_contents();
+	// editor_hardcode_initial_contents();
+	editor_load_file(string_from_lit("fedit.c"));
 	
 	Write_Buffer screen_buffer;
 	u8 screen_buffer_data[1024];
@@ -1002,6 +1300,8 @@ int main(void) {
 			write_buffer_append(&screen_buffer, string_from_lit("\r\n"));
 #endif
 			
+			
+#if 0
 			{
 				// Draw ~ for each row
 				for (int y = 0; y < state.window_size.height; y += 1) {
@@ -1022,6 +1322,44 @@ int main(void) {
 					}
 				}
 			}
+#else
+			{
+				i64 line_number = 0; // Absolute line number from the start of the buffer, the first that is visible
+				
+				Editor_Relative_Line rel_line = editor_relative_from_absolute_line(line_number);
+				Editor_Page *page = rel_line.page;
+				i64 line_relative_to_start_of_page = rel_line.line;
+				
+				for (int y = 0; y < state.window_size.height; y += 1) {
+					if (page && line_relative_to_start_of_page < page->line_count) {
+						// print line
+						Editor_Line *line = &page->lines[line_relative_to_start_of_page];
+						
+						i64 to_write = min(line->len, state.window_size.width);
+						write_buffer_append(&screen_buffer, string(line->data, to_write));
+						
+						
+						// check for end of page
+						line_relative_to_start_of_page += 1;
+						if (line_relative_to_start_of_page == page->line_count) {
+							page = page->next;
+							line_relative_to_start_of_page = 0;
+						}
+					} else {
+						// TODO: Display the welcome message
+						
+						write_buffer_append(&screen_buffer, string_from_lit("~"));
+					}
+					
+					// This doesn't work in Windows terminals, we have to clear the whole screen
+					// using the special code because Windows is a special kid.
+					// write_buffer_append(&screen_buffer, string_from_lit("\x1b[K")); // Clear row
+					if (y < state.window_size.height - 1) {
+						write_buffer_append(&screen_buffer, string_from_lit("\r\n"));
+					}
+				}
+			}
+#endif
 			
 			write_buffer_append(&screen_buffer, esc("H")); // Reset cursor
 			
