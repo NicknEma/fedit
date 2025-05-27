@@ -105,6 +105,14 @@
 #include <ctype.h>
 #include <errno.h>
 
+#ifdef min
+#undef min
+#endif
+
+#ifdef max
+#undef max
+#endif
+
 ////////////////////////////////
 //~ Base
 
@@ -112,6 +120,9 @@
 #define array_count(a) (sizeof(a)/sizeof((a)[0]))
 #define allow_break() do { int __x__ = 0; (void)__x__; } while (0)
 #define panic(...) assert(0)
+
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define max(a, b) ((a) > (b) ? (a) : (b))
 
 typedef  uint8_t  u8;
 typedef uint16_t u16;
@@ -801,7 +812,7 @@ get_clear_string(void) {
 			// write_console_unbuffered(esc("2J")); // Clear screen
 			// write_console_unbuffered(esc("H")); // Reposition cursor
 			
-			result = string(string_from_lit("\x1b2J\x1bH"));
+			result = string_from_lit("\x1b[2J\x1b[H");
 		} break;
 		
 		default: assert(0);
@@ -812,7 +823,7 @@ get_clear_string(void) {
 	// write_console_unbuffered(esc("2J")); // Clear screen
 	// write_console_unbuffered(esc("H")); // Reposition cursor
 	
-	result = string(string_from_lit("\x1b2J\x1bH"));
+	result = string_from_lit("\x1b[2J\x1b[H");
 #endif
 	
 	return result;
