@@ -1204,8 +1204,9 @@ editor_init_buffer(SliceU8 contents) {
 	
 	i64 line_start = 0;
 	i64 line_end = 0;
-	for (i64 byte_index = 0; byte_index < contents.len; byte_index += 1) {
-		if (contents.data[byte_index] == '\n') {
+	for (i64 byte_index = 0; byte_index <= contents.len; byte_index += 1) {
+		if (byte_index == contents.len || contents.data[byte_index] == '\n') {
+			// line_end = byte_index == contents.len ? byte_index + 1 : byte_index;
 			line_end = byte_index;
 			
 			// Fill line
