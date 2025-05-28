@@ -460,6 +460,7 @@ struct Editor_State {
 	Editor_Page *first_page;
 	Editor_Page *last_page;
 	i64 page_count;
+	i64 line_count;
 	
 	Editor_Page *first_free_page;
 	Editor_Line *first_free_line;
@@ -1181,7 +1182,13 @@ editor_hardcode_initial_contents(void) {
 
 static void
 editor_init_buffer(SliceU8 contents) {
-	// NOTE: !!!!! For now, overwrite previously loaded file.
+	
+	state.first_page = 0;
+	state.last_page = 0;
+	state.page_count = 0;
+	state.line_count = 0;
+	state.first_free_page = 0;
+	state.first_free_line = 0;
 	
 	Editor_Page *page = NULL;
 	
@@ -1191,6 +1198,7 @@ editor_init_buffer(SliceU8 contents) {
 	page->lines = alloc_safe(page->line_capacity * sizeof(Editor_Line));
 	page->next = NULL;
 	dll_push_back(state.first_page, state.last_page, page);
+	state.page_count += 1;
 	
 	// TODO: For now let's pretend that every file is LF
 	
@@ -1210,10 +1218,12 @@ editor_init_buffer(SliceU8 contents) {
 					page->lines = alloc_safe(page->line_capacity * sizeof(Editor_Line));
 					page->next = NULL;
 					dll_push_back(state.first_page, state.last_page, page);
+					state.page_count += 1;
 				}
 				
 				line = &page->lines[page->line_count];
 				page->line_count += 1;
+				state.line_count += 1;
 			}
 			
 			line->next = NULL;
@@ -1239,6 +1249,8 @@ editor_init_buffer(SliceU8 contents) {
 
 static void
 editor_load_file(String file_name) {
+	// NOTE: !!!!! For now, overwrite previously loaded file. @Leak
+	
 	Read_File_Result rf_result = read_file(file_name);
 	if (rf_result.ok) {
 		editor_init_buffer(rf_result.contents);
