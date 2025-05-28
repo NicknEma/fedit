@@ -159,6 +159,10 @@ fsize(FILE *fp) {
 
 #define min(a, b) ((a) < (b) ? (a) : (b))
 #define max(a, b) ((a) > (b) ? (a) : (b))
+#define clamp_top(a, b) min(a, b)
+#define clamp_bot(a, b) max(a, b)
+
+#define clamp(a, x, b) clamp_bot(a, clamp_top(x, b))
 
 //- Linked list helpers
 
@@ -408,6 +412,8 @@ write_buffer_flush(Write_Buffer *buffer) {
 ////////////////////////////////
 //~ Editor
 
+// TODO: Review all casts
+
 #define ESCAPE_PREFIX "\x1b["
 
 #define CTRL_KEY(k) ((k) & 0x1f)
@@ -416,6 +422,8 @@ write_buffer_flush(Write_Buffer *buffer) {
 
 #define EDITOR_DEFAULT_LINE_SIZE 64
 #define EDITOR_DEFAULT_PAGE_SIZE 64
+
+#define EDITOR_TAB_WIDTH 4
 
 //- Editor types
 
@@ -462,6 +470,9 @@ struct Editor_State {
 	i64 page_count;
 	i64 line_count;
 	
+	i64 vscroll;
+	i64 hscroll;
+	
 	Editor_Page *first_free_page;
 	Editor_Line *first_free_line;
 };
@@ -486,7 +497,12 @@ static void editor_hardcode_initial_contents(void);
 static void editor_init_buffer(SliceU8 contents);
 static void editor_load_file(String file_name);
 
+static void editor_update_scroll(void);
+
 static Editor_Relative_Line editor_relative_from_absolute_line(i64 absolute_line);
+static Editor_Line *editor_line_from_line_number(i64 line_number);
+static String editor_render_string_from_stored_string(String stored_string);
+static String editor_string_from_line(Editor_Line *line);
 
 static Editor_Relative_Line
 editor_relative_from_absolute_line(i64 absolute_line) {
@@ -509,6 +525,63 @@ editor_relative_from_absolute_line(i64 absolute_line) {
 		page = page->next;
 	}
 	
+	assert(result.page);
+	
+	return result;
+}
+
+static Editor_Line *
+editor_line_from_line_number(i64 line_number) {
+	Editor_Relative_Line rel = editor_relative_from_absolute_line(line_number);
+	Editor_Line *result = &rel.page->lines[rel.line];
+	return result;
+}
+
+static String
+editor_string_from_line(Editor_Line *line) {
+	return string(line->data, line->len);
+}
+
+// Expands tab characters to spaces
+static String
+editor_render_string_from_stored_string(String stored_string) {
+	int tab_count = 0;
+	for (i64 i = 0; i < stored_string.len; i += 1) {
+		if (stored_string.data[i] == '\t') {
+			tab_count += 1;
+		}
+	}
+	
+	String result;
+	result.len  = stored_string.len + tab_count*(EDITOR_TAB_WIDTH - 1);
+	result.data = alloc_safe(result.len * sizeof(u8));
+	
+	i64 write_index = 0;
+	for (i64 read_index = 0; read_index < stored_string.len; read_index += 1) {
+		if (stored_string.data[read_index] == '\t') {
+			for (i64 i = 0; i < EDITOR_TAB_WIDTH; i += 1) {
+				result.data[write_index + i] = ' ';
+			}
+			write_index += EDITOR_TAB_WIDTH;
+		} else {
+			result.data[write_index] = stored_string.data[read_index];
+			write_index += 1;
+		}
+	}
+	
+	return result;
+}
+
+static i64
+editor_render_x_from_stored_x(String stored_string, i64 stored_x) {
+	i64 tab_count = 0;
+	for (i64 i = 0; i < stored_x; i += 1) {
+		if (stored_string.data[i] == '\t') {
+			tab_count += 1;
+		}
+	}
+	
+	i64 result = tab_count*EDITOR_TAB_WIDTH + (stored_x - tab_count);
 	return result;
 }
 
@@ -1268,17 +1341,80 @@ editor_load_file(String file_name) {
 }
 
 static void
+editor_update_scroll(void) {
+	
+#if 0
+	// Scroll by 2
+	
+	// Vertical scroll
+	if (state.cursor_position.y < state.vscroll) {
+		state.vscroll = state.cursor_position.y - 1; // Scroll up by 2 lines
+		state.vscroll = max(state.vscroll, 0);
+	}
+	if (state.cursor_position.y >= state.vscroll + state.window_size.height) {
+		state.vscroll = state.cursor_position.y - state.window_size.height + 2;
+		state.vscroll = min(state.vscroll, state.line_count);
+	}
+	
+	// Horizontal scroll
+	if (state.cursor_position.x < state.hscroll) {
+		state.hscroll = state.cursor_position.x - 1;
+		state.hscroll = max(state.hscroll, 0);
+	}
+	if (state.cursor_position.x >= state.hscroll + state.window_size.width) {
+		state.hscroll = state.cursor_position.x - state.window_size.width + 2;
+		state.hscroll = min(state.hscroll, state.window_size.width);
+	}
+#else
+	// Simplified, scroll by 1
+	
+	// Vertical scroll
+	if (state.cursor_position.y < state.vscroll) {
+		state.vscroll = state.cursor_position.y;
+	}
+	if (state.cursor_position.y >= state.vscroll + state.window_size.height) {
+		state.vscroll = state.cursor_position.y - state.window_size.height + 1;
+	}
+	
+	Editor_Line *current_line = editor_line_from_line_number(state.cursor_position.y);
+	i64 cursor_render_x = editor_render_x_from_stored_x(editor_string_from_line(current_line), state.cursor_position.x);
+	
+	// Horizontal scroll
+	if (cursor_render_x < state.hscroll) {
+		state.hscroll = cursor_render_x;
+	}
+	if (cursor_render_x >= state.hscroll + state.window_size.width) {
+		state.hscroll = cursor_render_x - state.window_size.width + 1;
+	}
+#endif
+	
+}
+
+static void
 editor_move_cursor(Editor_Key key) {
 	
 	switch (key) {
 		case Editor_Key_ARROW_LEFT: {
 			if (state.cursor_position.x > 0) {
 				state.cursor_position.x -= 1;
+			} else {
+				// Move to end of previous line
+				if (state.cursor_position.y > 0) {
+					state.cursor_position.y -= 1;
+					Editor_Line *current_line = editor_line_from_line_number(state.cursor_position.y);
+					state.cursor_position.x = cast(i32) current_line->len;
+				}
 			}
 		} break;
 		case Editor_Key_ARROW_RIGHT: {
-			if (state.cursor_position.x < state.window_size.width - 1) {
+			Editor_Line *current_line = editor_line_from_line_number(state.cursor_position.y);
+			if (state.cursor_position.x < current_line->len) {
 				state.cursor_position.x += 1;
+			} else {
+				if (state.cursor_position.y < state.line_count - 1) {
+					state.cursor_position.y += 1;
+					state.cursor_position.x = 0;
+				}
 			}
 		} break;
 		case Editor_Key_ARROW_UP: {
@@ -1287,7 +1423,7 @@ editor_move_cursor(Editor_Key key) {
 			}
 		} break;
 		case Editor_Key_ARROW_DOWN: {
-			if (state.cursor_position.y < state.window_size.height - 1) {
+			if (state.cursor_position.y < state.line_count - 1) {
 				state.cursor_position.y += 1;
 			}
 		} break;
@@ -1296,9 +1432,12 @@ editor_move_cursor(Editor_Key key) {
 		}
 	}
 	
+	Editor_Line *current_line = editor_line_from_line_number(state.cursor_position.y);
+	if (state.cursor_position.x > current_line->len) {
+		state.cursor_position.x = cast(i32) current_line->len;
+	}
 }
 
-int main(void) {
 int main(int argc, char **argv) {
 	
 	before_main();
@@ -1317,14 +1456,13 @@ int main(int argc, char **argv) {
 	bool size_ok = query_window_size(&state.window_size);
 	assert(size_ok);
 	
-	// editor_hardcode_initial_contents();
-	// editor_load_file(string_from_lit("fedit.c"));
-	
 	Write_Buffer screen_buffer;
 	u8 screen_buffer_data[1024];
 	write_buffer_init(&screen_buffer, screen_buffer_data, sizeof(screen_buffer_data));
 	
 	while (true) {
+		
+		editor_update_scroll();
 		
 		{
 			write_buffer_append(&screen_buffer, esc("?25l")); // Hide cursor
@@ -1364,7 +1502,7 @@ int main(int argc, char **argv) {
 			}
 #else
 			{
-				i64 line_number = 0; // Absolute line number from the start of the buffer, the first that is visible
+				i64 line_number = state.vscroll; // Absolute line number from the start of the buffer, the first that is visible
 				
 				Editor_Relative_Line rel_line = editor_relative_from_absolute_line(line_number);
 				Editor_Page *page = rel_line.page;
@@ -1374,10 +1512,12 @@ int main(int argc, char **argv) {
 					if (page && line_relative_to_start_of_page < page->line_count) {
 						// print line
 						Editor_Line *line = &page->lines[line_relative_to_start_of_page];
+						String render_line = editor_render_string_from_stored_string(editor_string_from_line(line));
 						
-						i64 to_write = min(line->len, state.window_size.width);
-						write_buffer_append(&screen_buffer, string(line->data, to_write));
+						i64 to_write = clamp(0, render_line.len - state.hscroll, state.window_size.width);
+						write_buffer_append(&screen_buffer, string(render_line.data + state.hscroll, to_write));
 						
+						free(render_line.data); // TODO: ARENAS !!!
 						
 						// check for end of page
 						line_relative_to_start_of_page += 1;
@@ -1421,7 +1561,13 @@ int main(int argc, char **argv) {
 			
 			// Move cursor
 			char buf[32] = {0};
-			snprintf(buf, sizeof(buf), "\x1b[%d;%dH", state.cursor_position.y + 1, state.cursor_position.x + 1);
+			
+			Editor_Line *current_line = editor_line_from_line_number(state.cursor_position.y);
+			i64 cursor_render_x = editor_render_x_from_stored_x(editor_string_from_line(current_line), state.cursor_position.x);
+			
+			i32 cursor_y_on_screen = state.cursor_position.y - cast(i32) state.vscroll; // TODO: Review this cast
+			i32 cursor_x_on_screen = cast(i32) cursor_render_x - cast(i32) state.hscroll; // TODO: Review this cast
+			snprintf(buf, sizeof(buf), "\x1b[%d;%dH", cursor_y_on_screen + 1, cursor_x_on_screen + 1);
 			write_buffer_append(&screen_buffer, string_from_cstring(buf));
 			
 			write_buffer_append(&screen_buffer, esc("?25h")); // Show cursor
@@ -1459,7 +1605,8 @@ int main(int argc, char **argv) {
 			} break;
 			
 			case Editor_Key_END: {
-				state.cursor_position.x = state.window_size.width - 1;
+				Editor_Line *current_line = editor_line_from_line_number(state.cursor_position.y);
+				state.cursor_position.x = cast(i32) current_line->len;
 			} break;
 		}
 	}
