@@ -253,6 +253,18 @@ string(u8 *data, i64 len) {
 	return result;
 }
 
+static String
+string_clone(String s) {
+	// TODO: Arenas
+	
+	String result = {
+		.data = alloc_safe(s.len),
+		.len  = s.len,
+	};
+	memcpy(result.data, s.data, s.len);
+	return result;
+}
+
 static char *
 cstring_from_string(String s) {
 	// TODO: Arenas
@@ -444,6 +456,7 @@ struct Editor_State {
 	Size window_size;
 	Point cursor_position;
 	
+	String file_name;
 	Editor_Page *first_page;
 	Editor_Page *last_page;
 	i64 page_count;
@@ -1230,6 +1243,7 @@ editor_load_file(String file_name) {
 	if (rf_result.ok) {
 		editor_init_buffer(rf_result.contents);
 		free(rf_result.contents.data);
+		state.file_name = string_clone(file_name);
 	} else {
 		// TODO: Something
 	}
@@ -1278,7 +1292,7 @@ int main(void) {
 	assert(size_ok);
 	
 	// editor_hardcode_initial_contents();
-	editor_load_file(string_from_lit("fedit.c"));
+	// editor_load_file(string_from_lit("fedit.c"));
 	
 	Write_Buffer screen_buffer;
 	u8 screen_buffer_data[1024];
@@ -1346,9 +1360,25 @@ int main(void) {
 							line_relative_to_start_of_page = 0;
 						}
 					} else {
-						// TODO: Display the welcome message
-						
-						write_buffer_append(&screen_buffer, string_from_lit("~"));
+						if (!state.first_page && y == state.window_size.height / 3) {
+							
+#define FEDIT_VERSION "1"
+							char welcome[80];
+							int  welcomelen = snprintf(welcome, sizeof(welcome), "Fedit -- version %s", FEDIT_VERSION);
+							int to_write = min(welcomelen, state.window_size.width);
+							int padding = (state.window_size.width - to_write) / 2;
+							if (padding != 0) {
+								write_buffer_append(&screen_buffer, string_from_lit("~"));
+								padding -= 1;
+							}
+							while (padding != 0) {
+								write_buffer_append(&screen_buffer, string_from_lit(" "));
+								padding -= 1;
+							}
+							write_buffer_append(&screen_buffer, string(cast(u8 *) welcome, welcomelen));
+						} else {
+							write_buffer_append(&screen_buffer, string_from_lit("~"));
+						}
 					}
 					
 					// This doesn't work in Windows terminals, we have to clear the whole screen
