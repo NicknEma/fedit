@@ -1258,6 +1258,11 @@ editor_load_file(String file_name) {
 		state.file_name = string_clone(file_name);
 	} else {
 		// TODO: Something
+		
+		// If the file doesn't exist, simply leave the editor open with no loaded files
+		// Display a log message at the bottom or something
+		// For now just panic
+		panic("Could not read file");
 	}
 }
 
@@ -1293,12 +1298,20 @@ editor_move_cursor(Editor_Key key) {
 }
 
 int main(void) {
+int main(int argc, char **argv) {
 	
 	before_main();
 	enable_raw_mode();
 	
 	logfile = fopen("log.txt", "w");
 	assert(logfile);
+	
+	// Parse command-line args
+	String file_to_open = {0};
+	if (argc > 1) {
+		file_to_open = string_from_cstring(argv[1]);
+		editor_load_file(file_to_open);
+	}
 	
 	bool size_ok = query_window_size(&state.window_size);
 	assert(size_ok);
