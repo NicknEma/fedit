@@ -697,6 +697,46 @@ cstring_from_string(Arena *arena, String s) {
 	return result;
 }
 
+//- String builder types
+
+typedef struct String_Builder String_Builder;
+struct String_Builder {
+	u8  *data;
+	i64  len;
+	i64  cap;
+};
+
+//- String builder functions
+
+static void string_builder_init(String_Builder *builder, SliceU8 backing);
+static i64  string_builder_append(String_Builder *builder, String s);
+
+static String string_from_builder(String_Builder builder);
+
+static void
+string_builder_init(String_Builder *builder, SliceU8 backing) {
+	builder->data = backing.data;
+	builder->cap  = backing.len;
+	builder->len  = 0;
+}
+
+static i64
+string_builder_append(String_Builder *builder, String s) {
+	assert(builder->data); // Not initialized
+	
+	i64 space = builder->cap - builder->len;
+	i64 to_copy = min(space, s.len);
+	memcpy(builder->data + builder->len, s.data, to_copy);
+	builder->len += to_copy;
+	
+	return to_copy;
+}
+
+static String
+string_from_builder(String_Builder builder) {
+	return string(builder.data, builder.len);
+}
+
 ////////////////////////////////
 //~ File IO
 
@@ -753,55 +793,9 @@ read_file(Arena *arena, String file_name) {
 ////////////////////////////////
 //~ Console output helpers
 
-//- Console types
-
-typedef struct Write_Buffer Write_Buffer;
-struct Write_Buffer {
-	i64  cap;
-	i64  len;
-	u8  *data;
-};
-
 //- Console platform-specific functions
 
 static void write_console_unbuffered(String s);
-
-//- Console generic functions
-
-static void write_buffer_init(Write_Buffer *buffer, u8 *data, i64 cap);
-static void write_buffer_append(Write_Buffer *buffer, String s);
-static void write_buffer_flush(Write_Buffer *buffer);
-
-static void
-write_buffer_init(Write_Buffer *buffer, u8 *data, i64 cap) {
-	buffer->data = data;
-	buffer->cap  = cap;
-	buffer->len  = 0;
-}
-
-static void
-write_buffer_append(Write_Buffer *buffer, String s) {
-	assert(buffer->data); // Not initialized
-	
-	i64 available = buffer->cap - buffer->len;
-	i64 to_copy = min(available, s.len);
-	memcpy(buffer->data + buffer->len, s.data, to_copy);
-	buffer->len += to_copy;
-	
-	if (s.len > available) {
-		assert(buffer->len == buffer->cap);
-		
-		write_buffer_flush(buffer);
-		memcpy(buffer->data, s.data + available, s.len - available);
-		buffer->len += (s.len - available);
-	}
-}
-
-static void
-write_buffer_flush(Write_Buffer *buffer) {
-	write_console_unbuffered(string(buffer->data, buffer->len));
-	buffer->len = 0;
-}
 
 ////////////////////////////////
 //~ Editor
@@ -898,7 +892,7 @@ static Editor_State state;
 
 static FILE *logfile;
 
-//- Editor generic functions
+//- Editor generic functions (declarations)
 
 static void editor_init_buffer_contents(Editor_Buffer *buffer, SliceU8 contents);
 static void editor_load_file(String file_name);
@@ -911,10 +905,21 @@ static Editor_Line *editor_line_from_line_number(i64 line_number);
 static void editor_move_cursor(Editor_Key key);
 static void editor_update_scroll(void);
 
+static void editor_render_buffer(Editor_Buffer *buffer);
 static String editor_render_string_from_stored_string(Arena *arena, String stored_string);
 static i64 editor_render_x_from_stored_x(String stored_string, i64 stored_x);
 
 static void editor_validate_buffer(Editor_Buffer *buffer);
+
+//- Editor platform-specific functions (declarations)
+
+static void clear(void);
+static String get_clear_string(void);
+
+static bool query_window_size(Size *size);
+static bool query_cursor_position(Point *position);
+
+static Editor_Key wait_for_key(void);
 
 //- Editor helper functions
 
@@ -1013,6 +1018,140 @@ editor_render_x_from_stored_x(String stored_string, i64 stored_x) {
 	
 	i64 result = tab_count*EDITOR_TAB_WIDTH + (stored_x - tab_count);
 	return result;
+}
+
+//- Editor main render loop
+
+static void
+editor_render_buffer(Editor_Buffer *buffer) {
+	Scratch scratch = scratch_begin(0, 0);
+	
+	// TODO: Undo this pull-out of the strings and simply put in a big safety padding,
+	// this is stupid
+	
+	String esc_hide_cursor = esc("?25l");
+	String esc_clear_screen = get_clear_string();
+	String esc_invert_colors = esc("7m");
+	String esc_reset_colors = esc("m");
+	String esc_reset_cursor = esc("H");
+	String esc_show_cursor = esc("?25h");
+	
+	i64 builder_cap = (state.window_size.width * state.window_size.height +
+					   2 * state.window_size.height +
+					   esc_hide_cursor.len +
+					   esc_clear_screen.len +
+					   esc_invert_colors.len +
+					   esc_reset_colors.len +
+					   esc_reset_cursor.len +
+					   esc_show_cursor.len +
+					   1024);
+	
+	String_Builder builder;
+	string_builder_init(&builder, push_sliceu8(scratch.arena, builder_cap));
+	
+	string_builder_append(&builder, esc_hide_cursor);
+	
+	string_builder_append(&builder, esc_clear_screen);
+	
+	{
+		i64 line_number = buffer->vscroll; // Absolute line number from the start of the buffer, the first that is visible
+		
+		Editor_Relative_Line rel_line = editor_relative_from_absolute_line(line_number);
+		Editor_Page *page = rel_line.page;
+		i64 line_relative_to_start_of_page = rel_line.line;
+		
+		int num_rows_to_draw = state.window_size.height;
+		
+		for (int y = 0; y < num_rows_to_draw; y += 1) {
+			if (page && line_relative_to_start_of_page < page->line_count) {
+				{
+					// Print line
+					Editor_Line *line = &page->lines[line_relative_to_start_of_page];
+					String render_line = editor_render_string_from_stored_string(scratch.arena, string_from_editor_line(line));
+					
+					i64 to_write = clamp(0, render_line.len - buffer->hscroll, state.window_size.width);
+					string_builder_append(&builder, string(render_line.data + buffer->hscroll, to_write));
+				}
+				
+				// check for end of page
+				line_relative_to_start_of_page += 1;
+				if (line_relative_to_start_of_page == page->line_count) {
+					page = page->next;
+					line_relative_to_start_of_page = 0;
+				}
+			} else {
+				if (buffer == state.null_buffer && y == state.window_size.height / 3) {
+					
+#define FEDIT_VERSION "1"
+					char welcome[80];
+					int  welcomelen = snprintf(welcome, sizeof(welcome), "Fedit -- version %s", FEDIT_VERSION);
+					int to_write = min(welcomelen, state.window_size.width);
+					int padding = (state.window_size.width - to_write) / 2;
+					if (padding != 0) {
+						string_builder_append(&builder, string_from_lit("~"));
+						padding -= 1;
+					}
+					while (padding != 0) {
+						string_builder_append(&builder, string_from_lit(" "));
+						padding -= 1;
+					}
+					string_builder_append(&builder, string(cast(u8 *) welcome, welcomelen));
+				} else {
+					string_builder_append(&builder, string_from_lit("~"));
+				}
+			}
+			
+			// This doesn't work in Windows terminals, we have to clear the whole screen
+			// using the special code because Windows is a special kid.
+			// string_builder_append(&builder, string_from_lit("\x1b[K")); // Clear row
+			string_builder_append(&builder, string_from_lit("\r\n"));
+		}
+		
+		{
+			// Draw status bar:
+			
+			string_builder_append(&builder, esc_invert_colors);
+			
+			int len = 0;
+			char status[80];
+			if (buffer != state.null_buffer) {
+				String buffer_name = buffer->name;
+				len = snprintf(status, sizeof(status), "%.*s - %d lines",
+							   string_expand(buffer_name), cast(i32) buffer->line_count);
+				len = min(len, state.window_size.width);
+				string_builder_append(&builder, string(cast(u8 *) status, len));
+			} else {
+				len = snprintf(status, sizeof(status), "No buffer selected");
+				string_builder_append(&builder, string(cast(u8 *) status, len));
+			}
+			
+			for (int x = len; x < state.window_size.width; x += 1) {
+				string_builder_append(&builder, string_from_lit(" "));
+			}
+			
+			string_builder_append(&builder, esc_reset_colors);
+		}
+	}
+	
+	string_builder_append(&builder, esc_reset_cursor);
+	
+	// Move cursor
+	char buf[32] = {0};
+	
+	Editor_Line *current_line = editor_line_from_line_number(buffer->cursor_position.y);
+	i64 cursor_render_x = editor_render_x_from_stored_x(string_from_editor_line(current_line), buffer->cursor_position.x);
+	
+	i32 cursor_y_on_screen = buffer->cursor_position.y - cast(i32) buffer->vscroll; // TODO: Review this cast
+	i32 cursor_x_on_screen = cast(i32) cursor_render_x - cast(i32) buffer->hscroll; // TODO: Review this cast
+	snprintf(buf, sizeof(buf), "\x1b[%d;%dH", cursor_y_on_screen + 1, cursor_x_on_screen + 1);
+	string_builder_append(&builder, string_from_cstring(buf));
+	
+	string_builder_append(&builder, esc_show_cursor);
+	
+	// assert(builder.len == builder.cap);
+	write_console_unbuffered(string_from_builder(builder));
+	
+	scratch_end(scratch);
 }
 
 //- Editor buffer functions
@@ -1229,16 +1368,6 @@ editor_move_cursor(Editor_Key key) {
 		curr_buffer->cursor_position.x = cast(i32) current_line->len;
 	}
 }
-
-//- Editor platform-specific functions
-
-static void clear(void);
-static String get_clear_string(void);
-
-static bool query_window_size(Size *size);
-static bool query_cursor_position(Point *position);
-
-static Editor_Key wait_for_key(void);
 
 #if OS_WINDOWS
 
@@ -1942,128 +2071,12 @@ int main(int argc, char **argv) {
 	
 	assert(state.current_buffer); // Always!
 	
-	// Temporary: decrement the height to stop cursor from moving in the status bar.
-	// TODO: separate render-height and stored-height
-	// state.window_size.height -= 1;
-	
-	Write_Buffer screen_buffer;
-	u8 screen_buffer_data[1024];
-	write_buffer_init(&screen_buffer, screen_buffer_data, sizeof(screen_buffer_data));
-	
 	while (true) {
-		
 		assert(state.current_buffer); // Always!
 		
 		editor_update_scroll();
 		
-		Editor_Buffer *curr_buffer = state.current_buffer;
-		
-		{
-			write_buffer_append(&screen_buffer, esc("?25l")); // Hide cursor
-			
-			write_buffer_append(&screen_buffer, get_clear_string()); // Clear screen
-			
-			{
-				i64 line_number = curr_buffer->vscroll; // Absolute line number from the start of the buffer, the first that is visible
-				
-				Editor_Relative_Line rel_line = editor_relative_from_absolute_line(line_number);
-				Editor_Page *page = rel_line.page;
-				i64 line_relative_to_start_of_page = rel_line.line;
-				
-				int num_rows_to_draw = state.window_size.height;
-				
-				for (int y = 0; y < num_rows_to_draw; y += 1) {
-					if (page && line_relative_to_start_of_page < page->line_count) {
-						{
-							// Print line
-							Scratch scratch = scratch_begin(0, 0);
-							
-							Editor_Line *line = &page->lines[line_relative_to_start_of_page];
-							String render_line = editor_render_string_from_stored_string(scratch.arena, string_from_editor_line(line));
-							
-							i64 to_write = clamp(0, render_line.len - curr_buffer->hscroll, state.window_size.width);
-							write_buffer_append(&screen_buffer, string(render_line.data + curr_buffer->hscroll, to_write));
-							
-							scratch_end(scratch);
-						}
-						
-						// check for end of page
-						line_relative_to_start_of_page += 1;
-						if (line_relative_to_start_of_page == page->line_count) {
-							page = page->next;
-							line_relative_to_start_of_page = 0;
-						}
-					} else {
-						if (curr_buffer == state.null_buffer && y == state.window_size.height / 3) {
-							
-#define FEDIT_VERSION "1"
-							char welcome[80];
-							int  welcomelen = snprintf(welcome, sizeof(welcome), "Fedit -- version %s", FEDIT_VERSION);
-							int to_write = min(welcomelen, state.window_size.width);
-							int padding = (state.window_size.width - to_write) / 2;
-							if (padding != 0) {
-								write_buffer_append(&screen_buffer, string_from_lit("~"));
-								padding -= 1;
-							}
-							while (padding != 0) {
-								write_buffer_append(&screen_buffer, string_from_lit(" "));
-								padding -= 1;
-							}
-							write_buffer_append(&screen_buffer, string(cast(u8 *) welcome, welcomelen));
-						} else {
-							write_buffer_append(&screen_buffer, string_from_lit("~"));
-						}
-					}
-					
-					// This doesn't work in Windows terminals, we have to clear the whole screen
-					// using the special code because Windows is a special kid.
-					// write_buffer_append(&screen_buffer, string_from_lit("\x1b[K")); // Clear row
-					write_buffer_append(&screen_buffer, string_from_lit("\r\n"));
-				}
-				
-				{
-					// Draw status bar:
-					
-					write_buffer_append(&screen_buffer, esc("7m")); // Invert colors (to draw status bar)
-					
-					int len = 0;
-					char status[80];
-					if (curr_buffer != state.null_buffer) {
-						String buffer_name = curr_buffer->name;
-						len = snprintf(status, sizeof(status), "%.*s - %d lines",
-									   string_expand(buffer_name), cast(i32) curr_buffer->line_count);
-						len = min(len, state.window_size.width);
-						write_buffer_append(&screen_buffer, string(cast(u8 *) status, len));
-					} else {
-						len = snprintf(status, sizeof(status), "No buffer selected");
-						write_buffer_append(&screen_buffer, string(cast(u8 *) status, len));
-					}
-					
-					for (int x = len; x < state.window_size.width; x += 1) {
-						write_buffer_append(&screen_buffer, string_from_lit(" "));
-					}
-					
-					write_buffer_append(&screen_buffer, esc("m")); // Reset colors
-				}
-			}
-			
-			write_buffer_append(&screen_buffer, esc("H")); // Reset cursor
-			
-			// Move cursor
-			char buf[32] = {0};
-			
-			Editor_Line *current_line = editor_line_from_line_number(curr_buffer->cursor_position.y);
-			i64 cursor_render_x = editor_render_x_from_stored_x(string_from_editor_line(current_line), curr_buffer->cursor_position.x);
-			
-			i32 cursor_y_on_screen = curr_buffer->cursor_position.y - cast(i32) curr_buffer->vscroll; // TODO: Review this cast
-			i32 cursor_x_on_screen = cast(i32) cursor_render_x - cast(i32) curr_buffer->hscroll; // TODO: Review this cast
-			snprintf(buf, sizeof(buf), "\x1b[%d;%dH", cursor_y_on_screen + 1, cursor_x_on_screen + 1);
-			write_buffer_append(&screen_buffer, string_from_cstring(buf));
-			
-			write_buffer_append(&screen_buffer, esc("?25h")); // Show cursor
-			
-			write_buffer_flush(&screen_buffer);
-		}
+		editor_render_buffer(state.current_buffer);
 		
 		if (!query_window_size(&state.window_size)) {
 			panic();
@@ -2092,12 +2105,12 @@ int main(int argc, char **argv) {
 			} break;
 			
 			case Editor_Key_HOME: {
-				curr_buffer->cursor_position.x = 0;
+				state.current_buffer->cursor_position.x = 0;
 			} break;
 			
 			case Editor_Key_END: {
-				Editor_Line *current_line = editor_line_from_line_number(curr_buffer->cursor_position.y);
-				curr_buffer->cursor_position.x = cast(i32) current_line->len;
+				Editor_Line *current_line = editor_line_from_line_number(state.current_buffer->cursor_position.y);
+				state.current_buffer->cursor_position.x = cast(i32) current_line->len;
 			} break;
 		}
 	}
