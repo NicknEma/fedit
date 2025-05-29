@@ -1994,7 +1994,7 @@ int main(int argc, char **argv) {
 							line_relative_to_start_of_page = 0;
 						}
 					} else {
-						if (!curr_buffer->first_page && y == state.window_size.height / 3) {
+						if (curr_buffer == state.null_buffer && y == state.window_size.height / 3) {
 							
 #define FEDIT_VERSION "1"
 							char welcome[80];
@@ -2026,12 +2026,18 @@ int main(int argc, char **argv) {
 					
 					write_buffer_append(&screen_buffer, esc("7m")); // Invert colors (to draw status bar)
 					
+					int len = 0;
 					char status[80];
-					String buffer_name = curr_buffer->name;
-					int len = snprintf(status, sizeof(status), "%.*s - %d lines",
+					if (curr_buffer != state.null_buffer) {
+						String buffer_name = curr_buffer->name;
+						len = snprintf(status, sizeof(status), "%.*s - %d lines",
 									   string_expand(buffer_name), cast(i32) curr_buffer->line_count);
-					len = min(len, state.window_size.width);
-					write_buffer_append(&screen_buffer, string(cast(u8 *) status, len));
+						len = min(len, state.window_size.width);
+						write_buffer_append(&screen_buffer, string(cast(u8 *) status, len));
+					} else {
+						len = snprintf(status, sizeof(status), "No buffer selected");
+						write_buffer_append(&screen_buffer, string(cast(u8 *) status, len));
+					}
 					
 					for (int x = len; x < state.window_size.width; x += 1) {
 						write_buffer_append(&screen_buffer, string_from_lit(" "));
