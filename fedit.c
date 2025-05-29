@@ -1456,6 +1456,10 @@ int main(int argc, char **argv) {
 	bool size_ok = query_window_size(&state.window_size);
 	assert(size_ok);
 	
+	// Temporary: decrement the height to stop cursor from moving in the status bar.
+	// TODO: separate render-height and stored-height
+	// state.window_size.height -= 1;
+	
 	Write_Buffer screen_buffer;
 	u8 screen_buffer_data[1024];
 	write_buffer_init(&screen_buffer, screen_buffer_data, sizeof(screen_buffer_data));
@@ -1508,7 +1512,9 @@ int main(int argc, char **argv) {
 				Editor_Page *page = rel_line.page;
 				i64 line_relative_to_start_of_page = rel_line.line;
 				
-				for (int y = 0; y < state.window_size.height; y += 1) {
+				int num_rows_to_draw = state.window_size.height;
+				
+				for (int y = 0; y < num_rows_to_draw; y += 1) {
 					if (page && line_relative_to_start_of_page < page->line_count) {
 						// print line
 						Editor_Line *line = &page->lines[line_relative_to_start_of_page];
@@ -1550,9 +1556,26 @@ int main(int argc, char **argv) {
 					// This doesn't work in Windows terminals, we have to clear the whole screen
 					// using the special code because Windows is a special kid.
 					// write_buffer_append(&screen_buffer, string_from_lit("\x1b[K")); // Clear row
-					if (y < state.window_size.height - 1) {
-						write_buffer_append(&screen_buffer, string_from_lit("\r\n"));
+					write_buffer_append(&screen_buffer, string_from_lit("\r\n"));
+				}
+				
+				{
+					// Draw status bar:
+					
+					write_buffer_append(&screen_buffer, esc("7m")); // Invert colors (to draw status bar)
+					
+					char status[80];
+					String buffer_name = state.file_name.len > 0 ? state.file_name : string_from_lit("*none*");
+					int len = snprintf(status, sizeof(status), "%.*s - %d lines",
+									   string_expand(buffer_name), cast(i32) state.line_count);
+					len = min(len, state.window_size.width);
+					write_buffer_append(&screen_buffer, string(cast(u8 *) status, len));
+					
+					for (int x = len; x < state.window_size.width; x += 1) {
+						write_buffer_append(&screen_buffer, string_from_lit(" "));
 					}
+					
+					write_buffer_append(&screen_buffer, esc("m")); // Reset colors
 				}
 			}
 #endif
