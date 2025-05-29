@@ -104,21 +104,12 @@
 #include <errno.h>
 
 #ifdef min
-#undef min
+# undef min
 #endif
 
 #ifdef max
-#undef max
+# undef max
 #endif
-
-static void *alloc_safe(size_t size);
-
-static void *
-alloc_safe(size_t size) {
-	void *result = malloc(size);
-	assert(result);
-	return result;
-}
 
 /////////////////
 //~ fsize
@@ -152,10 +143,30 @@ fsize(FILE *fp) {
 ////////////////////////////////
 //~ Base
 
+//- Keywords
+
 #define cast(t) (t)
+
+#if COMPILER_MSVC
+# define per_thread __declspec(thread)
+#elif COMPILER_CLANG
+# define per_thread __thread
+#elif COMPILER_GCC
+# define per_thread __thread
+#endif
+
+#define alignof(t) _Alignof(t)
+
+//- Integer/pointer/array/type manipulations
+
 #define array_count(a) (sizeof(a)/sizeof((a)[0]))
-#define allow_break() do { int __x__ = 0; (void)__x__; } while (0)
-#define panic(...) assert(0)
+
+#define bytes(n)     (   1ULL * n)
+#define kilobytes(n) (1024ULL * bytes(n))
+#define megabytes(n) (1024ULL * kilobytes(n))
+#define gigabytes(n) (1024ULL * megabytes(n))
+
+//- Clamps, mins, maxes
 
 #define min(a, b) ((a) < (b) ? (a) : (b))
 #define max(a, b) ((a) > (b) ? (a) : (b))
@@ -163,6 +174,17 @@ fsize(FILE *fp) {
 #define clamp_bot(a, b) max(a, b)
 
 #define clamp(a, x, b) clamp_bot(a, clamp_top(x, b))
+
+//- Assertions
+
+#define allow_break() do { int __x__ = 0; (void)__x__; } while (0)
+#define panic(...) assert(0)
+
+#if OS_WINDOWS
+#define force_break() __debugbreak()
+#else
+#define force_break() (*(volatile int *)0 = 0)
+#endif
 
 //- Linked list helpers
 
@@ -230,53 +252,17 @@ struct Point {
 	i32 y;
 };
 
-typedef struct SliceU8 SliceU8;
-struct SliceU8 {
-	i64  len;
-	u8  *data;
-};
+//- bit math
 
-typedef struct String String;
-struct String {
-	i64  len;
-	u8  *data;
-};
-
-#define string_lit_expand(s)   s, (sizeof(s)-1)
-#define string_expand(s)       cast(int)(s).len, (s).data
-
-#define string_from_lit(s)     string(cast(u8 *)s, sizeof(s)-1)
-#define string_from_cstring(s) string(cast(u8 *)s, strlen(s))
-
-static String
-string(u8 *data, i64 len) {
-	String result = {
-		.data = data,
-		.len  = len,
-	};
-	return result;
+static bool
+is_power_of_two(u64 i) {
+	return i > 0 && (i & (i-1)) == 0;
 }
 
-static String
-string_clone(String s) {
-	// TODO: Arenas
-	
-	String result = {
-		.data = alloc_safe(s.len),
-		.len  = s.len,
-	};
-	memcpy(result.data, s.data, s.len);
-	return result;
-}
-
-static char *
-cstring_from_string(String s) {
-	// TODO: Arenas
-	
-	char *result = alloc_safe((s.len + 1) * sizeof(char));
-	memcpy(result, s.data, s.len);
-	result[s.len] = 0;
-	return result;
+static u64
+align_forward(u64 ptr, u64 alignment) {
+	assert(is_power_of_two(alignment));
+	return (ptr + alignment-1) & ~(alignment-1);
 }
 
 static u64
@@ -304,6 +290,414 @@ round_up_to_multiple_of_i64(i64 n, i64 r) {
 }
 
 ////////////////////////////////
+//~ Memory procedures
+
+#if OS_WINDOWS
+
+static void *
+mem_reserve(u64 size) {
+	void *result = VirtualAlloc(NULL, size, MEM_RESERVE, PAGE_NOACCESS); // No need to align the size, Windows will do it for us.
+	assert(result != NULL);
+	
+	return result;
+}
+
+static void *
+mem_commit(void *ptr, u64 size) {
+	void *result = VirtualAlloc(ptr, size, MEM_COMMIT, PAGE_READWRITE); // No need to align the size, Windows will do it for us.
+	assert(result != NULL);
+	
+	return result;
+}
+
+static void *
+mem_reserve_and_commit(u64 size) {
+	void *result = VirtualAlloc(NULL, size, MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE); // No need to align the size, Windows will do it for us.
+	assert(result != NULL);
+	
+	return result;
+}
+
+static bool
+mem_decommit(void *ptr, u64 size) {
+	return VirtualFree(ptr, size, MEM_DECOMMIT);
+}
+
+static bool
+mem_release(void *ptr, u64 size) {
+	(void)size; // Not needed on Windows
+	
+	return VirtualFree(ptr, 0, MEM_RELEASE);
+}
+
+#elif OS_LINUX
+
+#include <sys/mman.h>
+
+static void *
+mem_reserve(u64 size) {
+	void *result = mmap(0, size, 0, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+	assert(result != NULL);
+	
+	return result;
+}
+
+static void *
+mem_commit(void *ptr, u64 size) {
+	int r = mprotect(data, size, PROT_READ|PROT_WRITE);
+	assert(r != -1);
+	
+	return ptr;
+}
+
+static bool
+mem_decommit(void *data, u64 size) {
+	(void)mprotect(data, size, 0);
+	(void)madvise(data, size, MADV_FREE);
+}
+
+static bool
+mem_release(data: rawptr, size: uint) {
+	(void)munmap(data, size);
+}
+
+#endif
+
+////////////////////////////////
+//~ Arena
+
+//- Arena Constants
+
+#if !defined(ARENA_COMMIT_GRANULARITY)
+#define ARENA_COMMIT_GRANULARITY kilobytes(4)
+#endif
+
+#if !defined(ARENA_DECOMMIT_THRESHOLD)
+#define ARENA_DECOMMIT_THRESHOLD megabytes(64)
+#endif
+
+#if !defined(DEFAULT_ARENA_RESERVE_SIZE)
+#define DEFAULT_ARENA_RESERVE_SIZE gigabytes(1)
+#endif
+
+//- Arena Types
+
+typedef struct Arena Arena;
+struct Arena {
+	u8  *ptr;
+	u64  pos;
+	u64  cap;
+	u64  peak;
+	u64  commit_pos;
+};
+
+typedef struct Arena_Restore_Point Arena_Restore_Point;
+struct Arena_Restore_Point {
+	Arena *arena;
+	u64    pos;
+};
+
+//- Arena procedures
+
+static void arena_init(Arena *arena);
+static void arena_init_size(Arena *arena, u64 reserve_size);
+static bool arena_fini(Arena *arena);
+static void arena_reset(Arena *arena);
+
+static void *push_nozero(Arena *arena, u64 size, u64 alignment);
+static void *push_zero(Arena *arena, u64 size, u64 alignment);
+
+static void pop_to(Arena *arena, u64 pos);
+static void pop_amount(Arena *arena, u64 amount);
+
+static Arena_Restore_Point arena_begin_temp_region(Arena *arena);
+static void arena_end_temp_region(Arena_Restore_Point point);
+
+//- Arena operations: constructors/destructors
+
+static void
+arena_init(Arena *arena) {
+	arena_init_size(arena, DEFAULT_ARENA_RESERVE_SIZE);
+}
+
+static void
+arena_init_size(Arena *arena, u64 reserve_size) {
+	u8 *base = mem_reserve(reserve_size);
+	assert(base != NULL);
+	
+	arena->ptr  = base;
+	arena->cap  = reserve_size;
+	arena->pos  = 0;
+	arena->peak = 0;
+	arena->commit_pos = 0;
+}
+
+static bool
+arena_fini(Arena *arena) {
+	bool result = mem_release(arena->ptr, arena->cap);
+	memset(arena, 0, sizeof(Arena));
+	return result;
+}
+
+static void
+arena_reset(Arena *arena) {
+	pop_to(arena, 0);
+}
+
+//- Arena operations: push
+
+static void *
+push_nozero_aligned(Arena *arena, u64 size, u64 alignment) {
+	void *result = NULL;
+	
+	if (size > 0) {
+		u64 align_pos = align_forward(arena->pos, alignment);
+		if (align_pos + size <= arena->cap) {
+			arena->pos = align_pos;
+			
+			result = arena->ptr + arena->pos;
+			arena->pos += size;
+			
+			if (arena->pos > arena->commit_pos) {
+				u64 new_commit_pos = clamp_top(align_forward(arena->pos, ARENA_COMMIT_GRANULARITY), arena->cap);
+				
+				void *commit_base = arena->ptr + arena->commit_pos;
+				u64   commit_size = new_commit_pos - arena->commit_pos;
+				
+				(void)mem_commit(commit_base, commit_size);
+				arena->commit_pos = new_commit_pos;
+			}
+			
+			arena->peak = max(arena->pos, arena->peak);
+		} else {
+			panic("Arena is out of memory.");
+		}
+	}
+	
+	return result;
+}
+
+static void *
+push_zero_aligned(Arena *arena, u64 size, u64 alignment) {
+	void *result = push_nozero_aligned(arena, size, alignment);
+	memset(result, 0, size);
+	return result;
+}
+
+#define push_nozero(arena, size) push_nozero_aligned(arena, size, sizeof(u8))
+#define push_zero(arena, size)   push_zero_aligned(arena, size, sizeof(u8))
+
+#define push_aligned(arena, size, alignment) push_zero_aligned(arena, size, alignment)
+#define push(arena, size)                    push_zero(arena, size)
+
+#define push_type(arena, type)       cast(type *) push_aligned(arena, sizeof(type), alignof(type))
+#define push_array(arena, type, len) cast(type *) push_aligned(arena, (len)*sizeof(type), alignof(type))
+
+//- Arena operations: pop
+
+static void
+pop_to(Arena *arena, u64 pos) {
+	arena->pos = clamp_top(pos, arena->pos); // Prevent user from going forward, only go backward.
+	
+	u64 pos_aligned_to_commit_chunks = clamp_top(align_forward(arena->pos, ARENA_COMMIT_GRANULARITY), arena->cap);
+	
+	if (pos_aligned_to_commit_chunks + ARENA_DECOMMIT_THRESHOLD <= arena->commit_pos) {
+		u64   decommit_size = arena->commit_pos - pos_aligned_to_commit_chunks;
+		void *decommit_base = arena->ptr + pos_aligned_to_commit_chunks;
+		
+		mem_decommit(decommit_base, decommit_size);
+		arena->commit_pos = pos_aligned_to_commit_chunks;
+	}
+}
+
+static void
+pop_amount(Arena *arena, u64 amount) {
+	u64 amount_clamped = clamp_top(amount, arena->pos); // Prevent user from going to negative positions
+	pop_to(arena, arena->pos - amount_clamped);
+}
+
+#define pop(arena, amount) pop_amount(arena, amount)
+
+//- Arena operations: Temp
+
+static Arena_Restore_Point
+arena_begin_temp_region(Arena *arena) {
+	Arena_Restore_Point point = {arena, arena->pos};
+	return point;
+}
+
+static void
+arena_end_temp_region(Arena_Restore_Point point) {
+	pop_to(point.arena, point.pos);
+}
+
+////////////////////////////////
+//~ Scratch Memory
+
+//- Scratch Memory Constants
+
+#if !defined(SCRATCH_ARENA_COUNT)
+#define SCRATCH_ARENA_COUNT 2
+#endif
+
+#if !defined(SCRATCH_ARENA_RESERVE_SIZE)
+#define SCRATCH_ARENA_RESERVE_SIZE gigabytes(8)
+#endif
+
+//- Scratch Memory Types
+
+typedef Arena_Restore_Point Scratch;
+
+//- Scratch Memory Variables
+
+#if SCRATCH_ARENA_COUNT > 0
+per_thread Arena scratch_arenas[SCRATCH_ARENA_COUNT];
+#endif
+
+//- Scratch Memory Functions
+
+static Scratch scratch_begin(Arena **conflicts, i64 conflict_count);
+static void    scratch_end(Scratch scratch);
+
+static Scratch
+scratch_begin(Arena **conflicts, i64 conflict_count) {
+	Scratch scratch = {0};
+	
+#if SCRATCH_ARENA_COUNT > 0
+	if (scratch_arenas[0].ptr == NULL) { // unlikely()
+		for (int i = 0; i < array_count(scratch_arenas); i += 1) {
+			arena_init_size(&scratch_arenas[i], SCRATCH_ARENA_RESERVE_SIZE);
+		}
+	}
+#endif
+	
+	for (i64 scratch_arena_index = 0; scratch_arena_index < array_count(scratch_arenas); scratch_arena_index += 1) {
+		bool is_conflicting = false;
+		for (i64 conflict_index = 0; conflict_index < conflict_count; conflict_index += 1) {
+			if (conflicts[conflict_index] == &scratch_arenas[scratch_arena_index]) {
+				is_conflicting = true;
+				break;
+			}
+		}
+		
+		if (!is_conflicting) {
+			scratch = arena_begin_temp_region(&scratch_arenas[scratch_arena_index]);
+			break;
+		}
+	}
+	
+	return scratch;
+}
+
+static void
+scratch_end(Scratch scratch) {
+	arena_end_temp_region(scratch);
+}
+
+////////////////////////////////
+//~ Strings and slices
+
+//- String and slice types
+
+typedef struct SliceU8 SliceU8;
+struct SliceU8 {
+	i64  len;
+	u8  *data;
+};
+
+typedef struct String String;
+struct String {
+	i64  len;
+	u8  *data;
+};
+
+//- Slice functions
+
+static SliceU8
+make_sliceu8(u8 *data, i64 len) {
+	SliceU8 result = {
+		.data = data,
+		.len  = len,
+	};
+	return result;
+}
+
+static SliceU8
+push_sliceu8(Arena *arena, i64 len) {
+	SliceU8 result = {
+		.data = push(arena, cast(u64) len),
+		.len  = len,
+	};
+	return result;
+}
+
+static SliceU8
+sliceu8_from_string(String s) {
+	return make_sliceu8(s.data, s.len);
+}
+
+static SliceU8
+sliceu8_clone(Arena *arena, SliceU8 s) {
+	// We don't call push_sliceu8() because that clears memory to 0 and we don't need that here.
+	SliceU8 result = {
+		.data = push_nozero(arena, s.len),
+		.len  = s.len,
+	};
+	memcpy(result.data, s.data, s.len);
+	return result;
+}
+
+//- String functions
+
+#define string_lit_expand(s)   s, (sizeof(s)-1)
+#define string_expand(s)       cast(int)(s).len, (s).data
+
+#define string_from_lit(s)     string(cast(u8 *)s, sizeof(s)-1)
+#define string_from_cstring(s) string(cast(u8 *)s, strlen(s))
+
+static String
+string(u8 *data, i64 len) {
+	String result = {
+		.data = data,
+		.len  = len,
+	};
+	return result;
+}
+
+static String
+push_string(Arena *arena, i64 len) {
+	String result = {
+		.data = push(arena, cast(u64) len),
+		.len  = len,
+	};
+	return result;
+}
+
+static String
+string_from_sliceu8(SliceU8 s) {
+	return string(s.data, s.len);
+}
+
+static String
+string_clone(Arena *arena, String s) {
+	// We don't call push_string() because that clears memory to 0 and we don't need that here.
+	String result = {
+		.data = push_nozero(arena, s.len),
+		.len  = s.len,
+	};
+	memcpy(result.data, s.data, s.len);
+	return result;
+}
+
+static char *
+cstring_from_string(Arena *arena, String s) {
+	char *result = push_nozero(arena, (s.len + 1) * sizeof(char));
+	memcpy(result, s.data, s.len);
+	result[s.len] = 0;
+	return result;
+}
+
+////////////////////////////////
 //~ File IO
 
 //- File IO types
@@ -311,27 +705,27 @@ round_up_to_multiple_of_i64(i64 n, i64 r) {
 typedef struct Read_File_Result Read_File_Result;
 struct Read_File_Result {
 	SliceU8 contents;
-	bool ok;
+	bool    ok;
 };
 
 //- File IO functions
 
-static Read_File_Result read_file(String file_name);
+static Read_File_Result read_file(Arena *arena, String file_name);
 
 static Read_File_Result
-read_file(String file_name) {
+read_file(Arena *arena, String file_name) {
 	Read_File_Result result = {0};
 	
-	char *file_name_ = cstring_from_string(file_name);
-	assert(file_name_); // TODO: Arenas
+	Scratch scratch = scratch_begin(&arena, 1);
+	char *file_name_null_terminated = cstring_from_string(scratch.arena, file_name);
 	
-	FILE *handle = fopen(file_name_, "rb");
+	FILE *handle = fopen(file_name_null_terminated, "rb");
 	if (handle) {
 		errno = 0;
 		size_t size = fsize(handle);
 		if (errno == 0) {
 			result.contents.len  = size;
-			result.contents.data = malloc(size * sizeof(u8)); // Caller is responsible for freeing. TODO: Arenas
+			result.contents.data = push_nozero(arena, size * sizeof(u8));
 			assert(result.contents.data); // TODO: Switch to an if-else?
 			
 			i64 read_amount  = fread(result.contents.data,
@@ -351,7 +745,7 @@ read_file(String file_name) {
 		// TODO: something
 	}
 	
-	free(file_name_);
+	scratch_end(scratch);
 	
 	return result;
 }
@@ -442,7 +836,7 @@ typedef enum Editor_Key Editor_Key;
 
 typedef struct Editor_Line Editor_Line;
 struct Editor_Line {
-	Editor_Line *next;
+	Editor_Line *next; // For the free-list
 	
 	i64  len;
 	i64  cap;
@@ -459,12 +853,15 @@ struct Editor_Page {
 	i64 line_capacity;
 };
 
-typedef struct Editor_State Editor_State;
-struct Editor_State {
-	Size window_size;
+typedef struct Editor_Buffer Editor_Buffer;
+struct Editor_Buffer {
+	bool is_read_only;
+	
+	Arena arena;
+	String name;
+	String file_name;
 	Point cursor_position;
 	
-	String file_name;
 	Editor_Page *first_page;
 	Editor_Page *last_page;
 	i64 page_count;
@@ -475,6 +872,17 @@ struct Editor_State {
 	
 	Editor_Page *first_free_page;
 	Editor_Line *first_free_line;
+};
+
+typedef struct Editor_State Editor_State;
+struct Editor_State {
+	Arena arena;
+	
+	Size window_size;
+	
+	Editor_Buffer *current_buffer;
+	Editor_Buffer *single_buffer;
+	Editor_Buffer *null_buffer;
 };
 
 typedef struct Editor_Relative_Line Editor_Relative_Line;
@@ -492,40 +900,47 @@ static FILE *logfile;
 
 //- Editor generic functions
 
-static void editor_move_cursor(Editor_Key key);
-static void editor_hardcode_initial_contents(void);
-static void editor_init_buffer(SliceU8 contents);
+static void editor_init_buffer_contents(Editor_Buffer *buffer, SliceU8 contents);
 static void editor_load_file(String file_name);
+static bool editor_buffer_is_in_use(Editor_Buffer *buffer);
 
-static void editor_update_scroll(void);
-
+static String string_from_editor_line(Editor_Line *line);
 static Editor_Relative_Line editor_relative_from_absolute_line(i64 absolute_line);
 static Editor_Line *editor_line_from_line_number(i64 line_number);
-static String editor_render_string_from_stored_string(String stored_string);
-static String editor_string_from_line(Editor_Line *line);
+
+static void editor_move_cursor(Editor_Key key);
+static void editor_update_scroll(void);
+
+static String editor_render_string_from_stored_string(Arena *arena, String stored_string);
+static i64 editor_render_x_from_stored_x(String stored_string, i64 stored_x);
+
+static void editor_validate_buffer(Editor_Buffer *buffer);
+
+//- Editor helper functions
+
+static String
+string_from_editor_line(Editor_Line *line) {
+	return string(line->data, line->len);
+}
 
 static Editor_Relative_Line
 editor_relative_from_absolute_line(i64 absolute_line) {
 	Editor_Relative_Line result = {0};
 	
-	i64 line_remaining = absolute_line;
-	
-	Editor_Page *page = state.first_page;
-	i64 page_index = 0;
+	i64 line = absolute_line;
+	Editor_Page *page = state.current_buffer->first_page;
 	while (page) {
-		if (line_remaining < page->line_count) {
+		if (line < page->line_count) {
 			result.page = page;
-			result.line = line_remaining;
+			result.line = line;
 			break;
 		}
 		
-		line_remaining -= page->line_count;
-		
-		page_index += 1;
-		page = page->next;
+		line -= page->line_count;
+		page  = page->next;
 	}
 	
-	assert(result.page);
+	assert(result.page && result.page->lines);
 	
 	return result;
 }
@@ -537,14 +952,29 @@ editor_line_from_line_number(i64 line_number) {
 	return result;
 }
 
-static String
-editor_string_from_line(Editor_Line *line) {
-	return string(line->data, line->len);
+//- Editor debug functions
+
+static void
+editor_validate_buffer(Editor_Buffer *buffer) {
+	i64 line_count = 0;
+	
+	Editor_Page *page = buffer->first_page;
+	while (page) {
+		line_count += page->line_count;
+		page = page->next;
+	}
+	
+	assert(line_count == buffer->line_count);
+	assert(line_count > 0);
+	
+	allow_break();
 }
+
+//- Editor line rendering functions
 
 // Expands tab characters to spaces
 static String
-editor_render_string_from_stored_string(String stored_string) {
+editor_render_string_from_stored_string(Arena *arena, String stored_string) {
 	int tab_count = 0;
 	for (i64 i = 0; i < stored_string.len; i += 1) {
 		if (stored_string.data[i] == '\t') {
@@ -554,7 +984,7 @@ editor_render_string_from_stored_string(String stored_string) {
 	
 	String result;
 	result.len  = stored_string.len + tab_count*(EDITOR_TAB_WIDTH - 1);
-	result.data = alloc_safe(result.len * sizeof(u8));
+	result.data = push_nozero(arena, result.len * sizeof(u8));
 	
 	i64 write_index = 0;
 	for (i64 read_index = 0; read_index < stored_string.len; read_index += 1) {
@@ -583,6 +1013,221 @@ editor_render_x_from_stored_x(String stored_string, i64 stored_x) {
 	
 	i64 result = tab_count*EDITOR_TAB_WIDTH + (stored_x - tab_count);
 	return result;
+}
+
+//- Editor buffer functions
+
+static bool
+editor_buffer_is_in_use(Editor_Buffer *buffer) {
+	return buffer->name.len > 0;
+}
+
+static void
+editor_init_buffer_contents(Editor_Buffer *buffer, SliceU8 contents) {
+	// Assumes that the raw contents encode line breaks as LF.
+	
+	assert(buffer->arena.ptr);
+	
+	buffer->cursor_position.x = 0;
+	buffer->cursor_position.y = 0;
+	buffer->vscroll = 0;
+	buffer->hscroll = 0;
+	buffer->page_count = 0;
+	buffer->line_count = 0;
+	buffer->first_page = NULL;
+	buffer->last_page  = NULL;
+	buffer->first_free_page = NULL;
+	buffer->first_free_line = NULL;
+	
+	Editor_Page *page;
+	{
+		page = push_type(&buffer->arena, Editor_Page);
+		page->line_count    = 0;
+		page->line_capacity = EDITOR_DEFAULT_PAGE_SIZE;
+		page->lines = push_array(&buffer->arena, Editor_Line, page->line_capacity);
+		page->next  = NULL;
+		dll_push_back(buffer->first_page, buffer->last_page, page);
+		buffer->page_count += 1;
+	}
+	
+	i64 line_start = 0;
+	i64 line_end = 0;
+	for (i64 byte_index = 0; byte_index <= contents.len; byte_index += 1) {
+		if (byte_index == contents.len || contents.data[byte_index] == '\n') {
+			line_end = byte_index;
+			
+			// Get line
+			Editor_Line *line = NULL;
+			{
+				if (page->line_count >= page->line_capacity) {
+					page = push_type(&buffer->arena, Editor_Page);
+					page->line_count    = 0;
+					page->line_capacity = EDITOR_DEFAULT_PAGE_SIZE;
+					page->lines = push_array(&buffer->arena, Editor_Line, page->line_capacity);
+					page->next  = NULL;
+					dll_push_back(buffer->first_page, buffer->last_page, page);
+					buffer->page_count += 1;
+				}
+				
+				line = &page->lines[page->line_count];
+				page->line_count += 1;
+				buffer->line_count += 1;
+			}
+			
+			// Fill line
+			line->next = NULL;
+			
+			line->len = line_end - line_start;
+			line->cap = round_up_to_multiple_of_i64(clamp_bot(1, line->len), EDITOR_DEFAULT_LINE_SIZE);
+			line->data = push_array(&buffer->arena, u8, line->cap);
+			
+			memcpy(line->data, contents.data + line_start, line->len);
+			
+			// Prepare for next iteration
+			line_start = line_end + 1;
+		}
+	}
+	
+	return;
+}
+
+static void
+editor_load_file(String file_name) {
+	// Overwrite previously loaded file.
+	
+	if (!state.single_buffer) {
+		state.single_buffer = push_type(&state.arena, Editor_Buffer);
+	}
+	
+	if (!state.single_buffer->arena.ptr) {
+		arena_init(&state.single_buffer->arena);
+	} else {
+		arena_reset(&state.single_buffer->arena);
+	}
+	
+	Scratch scratch = scratch_begin(0, 0);
+	
+	Read_File_Result read_file_result = read_file(scratch.arena, file_name);
+	if (read_file_result.ok) {
+		// TODO: For now let's pretend that every file is LF
+		editor_init_buffer_contents(state.single_buffer, read_file_result.contents);
+		
+		state.single_buffer->file_name = string_clone(&state.single_buffer->arena, file_name);
+		state.single_buffer->name      = state.single_buffer->file_name;
+	} else {
+		// TODO: Something
+		
+		// If the file doesn't exist, simply leave the editor open with no loaded files
+		// Display a log message at the bottom or something
+		// For now just panic
+		panic("Could not read file");
+	}
+	
+	scratch_end(scratch);
+}
+
+//- Editor cursor/view functions
+
+static void
+editor_update_scroll(void) {
+	
+	Editor_Buffer *curr_buffer = state.current_buffer;
+	
+#if 0
+	// Scroll by 2
+	
+	// Vertical scroll
+	if (state.cursor_position.y < state.vscroll) {
+		state.vscroll = state.cursor_position.y - 1; // Scroll up by 2 lines
+		state.vscroll = max(state.vscroll, 0);
+	}
+	if (state.cursor_position.y >= state.vscroll + state.window_size.height) {
+		state.vscroll = state.cursor_position.y - state.window_size.height + 2;
+		state.vscroll = min(state.vscroll, state.line_count);
+	}
+	
+	// Horizontal scroll
+	if (state.cursor_position.x < state.hscroll) {
+		state.hscroll = state.cursor_position.x - 1;
+		state.hscroll = max(state.hscroll, 0);
+	}
+	if (state.cursor_position.x >= state.hscroll + state.window_size.width) {
+		state.hscroll = state.cursor_position.x - state.window_size.width + 2;
+		state.hscroll = min(state.hscroll, state.window_size.width);
+	}
+#else
+	// Simplified, scroll by 1
+	
+	// Vertical scroll
+	if (curr_buffer->cursor_position.y < curr_buffer->vscroll) {
+		curr_buffer->vscroll = curr_buffer->cursor_position.y;
+	}
+	if (curr_buffer->cursor_position.y >= curr_buffer->vscroll + state.window_size.height) {
+		curr_buffer->vscroll = curr_buffer->cursor_position.y - state.window_size.height + 1;
+	}
+	
+	Editor_Line *current_line = editor_line_from_line_number(curr_buffer->cursor_position.y);
+	i64 cursor_render_x = editor_render_x_from_stored_x(string_from_editor_line(current_line), curr_buffer->cursor_position.x);
+	
+	// Horizontal scroll
+	if (cursor_render_x < curr_buffer->hscroll) {
+		curr_buffer->hscroll = cursor_render_x;
+	}
+	if (cursor_render_x >= curr_buffer->hscroll + state.window_size.width) {
+		curr_buffer->hscroll = cursor_render_x - state.window_size.width + 1;
+	}
+#endif
+	
+}
+
+static void
+editor_move_cursor(Editor_Key key) {
+	
+	Editor_Buffer *curr_buffer = state.current_buffer;
+	
+	switch (key) {
+		case Editor_Key_ARROW_LEFT: {
+			if (curr_buffer->cursor_position.x > 0) {
+				curr_buffer->cursor_position.x -= 1;
+			} else {
+				// Move to end of previous line
+				if (curr_buffer->cursor_position.y > 0) {
+					curr_buffer->cursor_position.y -= 1;
+					Editor_Line *current_line = editor_line_from_line_number(curr_buffer->cursor_position.y);
+					curr_buffer->cursor_position.x = cast(i32) current_line->len;
+				}
+			}
+		} break;
+		case Editor_Key_ARROW_RIGHT: {
+			Editor_Line *current_line = editor_line_from_line_number(curr_buffer->cursor_position.y);
+			if (curr_buffer->cursor_position.x < current_line->len) {
+				curr_buffer->cursor_position.x += 1;
+			} else {
+				if (curr_buffer->cursor_position.y < curr_buffer->line_count - 1) {
+					curr_buffer->cursor_position.y += 1;
+					curr_buffer->cursor_position.x = 0;
+				}
+			}
+		} break;
+		case Editor_Key_ARROW_UP: {
+			if (curr_buffer->cursor_position.y > 0) {
+				curr_buffer->cursor_position.y -= 1;
+			}
+		} break;
+		case Editor_Key_ARROW_DOWN: {
+			if (curr_buffer->cursor_position.y < curr_buffer->line_count - 1) {
+				curr_buffer->cursor_position.y += 1;
+			}
+		} break;
+		default: {
+			panic("Invalid switch case");
+		}
+	}
+	
+	Editor_Line *current_line = editor_line_from_line_number(curr_buffer->cursor_position.y);
+	if (curr_buffer->cursor_position.x > current_line->len) {
+		curr_buffer->cursor_position.x = cast(i32) current_line->len;
+	}
 }
 
 //- Editor platform-specific functions
@@ -1242,202 +1887,6 @@ report_error(char *message) {
 }
 #endif
 
-static void
-editor_hardcode_initial_contents(void) {
-	String line_text = string_from_lit("Hello, world!");
-	SliceU8 contents = { // TODO: Conversion function
-		.data = line_text.data,
-		.len  = line_text.len,
-	};
-	
-	editor_init_buffer(contents);
-}
-
-static void
-editor_init_buffer(SliceU8 contents) {
-	
-	state.first_page = 0;
-	state.last_page = 0;
-	state.page_count = 0;
-	state.line_count = 0;
-	state.first_free_page = 0;
-	state.first_free_line = 0;
-	
-	Editor_Page *page = NULL;
-	
-	page = alloc_safe(sizeof(Editor_Page));
-	page->line_count = 0;
-	page->line_capacity = EDITOR_DEFAULT_PAGE_SIZE;
-	page->lines = alloc_safe(page->line_capacity * sizeof(Editor_Line));
-	page->next = NULL;
-	dll_push_back(state.first_page, state.last_page, page);
-	state.page_count += 1;
-	
-	// TODO: For now let's pretend that every file is LF
-	
-	i64 line_start = 0;
-	i64 line_end = 0;
-	for (i64 byte_index = 0; byte_index <= contents.len; byte_index += 1) {
-		if (byte_index == contents.len || contents.data[byte_index] == '\n') {
-			// line_end = byte_index == contents.len ? byte_index + 1 : byte_index;
-			line_end = byte_index;
-			
-			// Fill line
-			Editor_Line *line = NULL;
-			{
-				if (page->line_count >= page->line_capacity) {
-					page = alloc_safe(sizeof(Editor_Page));
-					page->line_count = 0;
-					page->line_capacity = EDITOR_DEFAULT_PAGE_SIZE;
-					page->lines = alloc_safe(page->line_capacity * sizeof(Editor_Line));
-					page->next = NULL;
-					dll_push_back(state.first_page, state.last_page, page);
-					state.page_count += 1;
-				}
-				
-				line = &page->lines[page->line_count];
-				page->line_count += 1;
-				state.line_count += 1;
-			}
-			
-			line->next = NULL;
-			
-			i64 line_len = line_end - line_start; // NOTE: This could be 0. Is alloc_safe(0) well-defined?
-			i64 line_size = round_up_to_multiple_of_i64(line_len, EDITOR_DEFAULT_LINE_SIZE);
-			line->data = malloc(line_size * sizeof(u8));
-			if (line_len > 0) { assert(line->data); }
-			
-			line->len = line_len;
-			line->cap = line_size;
-			memcpy(line->data, contents.data + line_start, line_len);
-			
-			// Prepare for next iteration
-			line_start = line_end + 1;
-			
-			allow_break();
-		}
-	}
-	
-	allow_break();
-}
-
-static void
-editor_load_file(String file_name) {
-	// NOTE: !!!!! For now, overwrite previously loaded file. @Leak
-	
-	Read_File_Result rf_result = read_file(file_name);
-	if (rf_result.ok) {
-		editor_init_buffer(rf_result.contents);
-		free(rf_result.contents.data);
-		state.file_name = string_clone(file_name);
-	} else {
-		// TODO: Something
-		
-		// If the file doesn't exist, simply leave the editor open with no loaded files
-		// Display a log message at the bottom or something
-		// For now just panic
-		panic("Could not read file");
-	}
-}
-
-static void
-editor_update_scroll(void) {
-	
-#if 0
-	// Scroll by 2
-	
-	// Vertical scroll
-	if (state.cursor_position.y < state.vscroll) {
-		state.vscroll = state.cursor_position.y - 1; // Scroll up by 2 lines
-		state.vscroll = max(state.vscroll, 0);
-	}
-	if (state.cursor_position.y >= state.vscroll + state.window_size.height) {
-		state.vscroll = state.cursor_position.y - state.window_size.height + 2;
-		state.vscroll = min(state.vscroll, state.line_count);
-	}
-	
-	// Horizontal scroll
-	if (state.cursor_position.x < state.hscroll) {
-		state.hscroll = state.cursor_position.x - 1;
-		state.hscroll = max(state.hscroll, 0);
-	}
-	if (state.cursor_position.x >= state.hscroll + state.window_size.width) {
-		state.hscroll = state.cursor_position.x - state.window_size.width + 2;
-		state.hscroll = min(state.hscroll, state.window_size.width);
-	}
-#else
-	// Simplified, scroll by 1
-	
-	// Vertical scroll
-	if (state.cursor_position.y < state.vscroll) {
-		state.vscroll = state.cursor_position.y;
-	}
-	if (state.cursor_position.y >= state.vscroll + state.window_size.height) {
-		state.vscroll = state.cursor_position.y - state.window_size.height + 1;
-	}
-	
-	Editor_Line *current_line = editor_line_from_line_number(state.cursor_position.y);
-	i64 cursor_render_x = editor_render_x_from_stored_x(editor_string_from_line(current_line), state.cursor_position.x);
-	
-	// Horizontal scroll
-	if (cursor_render_x < state.hscroll) {
-		state.hscroll = cursor_render_x;
-	}
-	if (cursor_render_x >= state.hscroll + state.window_size.width) {
-		state.hscroll = cursor_render_x - state.window_size.width + 1;
-	}
-#endif
-	
-}
-
-static void
-editor_move_cursor(Editor_Key key) {
-	
-	switch (key) {
-		case Editor_Key_ARROW_LEFT: {
-			if (state.cursor_position.x > 0) {
-				state.cursor_position.x -= 1;
-			} else {
-				// Move to end of previous line
-				if (state.cursor_position.y > 0) {
-					state.cursor_position.y -= 1;
-					Editor_Line *current_line = editor_line_from_line_number(state.cursor_position.y);
-					state.cursor_position.x = cast(i32) current_line->len;
-				}
-			}
-		} break;
-		case Editor_Key_ARROW_RIGHT: {
-			Editor_Line *current_line = editor_line_from_line_number(state.cursor_position.y);
-			if (state.cursor_position.x < current_line->len) {
-				state.cursor_position.x += 1;
-			} else {
-				if (state.cursor_position.y < state.line_count - 1) {
-					state.cursor_position.y += 1;
-					state.cursor_position.x = 0;
-				}
-			}
-		} break;
-		case Editor_Key_ARROW_UP: {
-			if (state.cursor_position.y > 0) {
-				state.cursor_position.y -= 1;
-			}
-		} break;
-		case Editor_Key_ARROW_DOWN: {
-			if (state.cursor_position.y < state.line_count - 1) {
-				state.cursor_position.y += 1;
-			}
-		} break;
-		default: {
-			panic("Invalid switch case");
-		}
-	}
-	
-	Editor_Line *current_line = editor_line_from_line_number(state.cursor_position.y);
-	if (state.cursor_position.x > current_line->len) {
-		state.cursor_position.x = cast(i32) current_line->len;
-	}
-}
-
 int main(int argc, char **argv) {
 	
 	before_main();
@@ -1446,15 +1895,52 @@ int main(int argc, char **argv) {
 	logfile = fopen("log.txt", "w");
 	assert(logfile);
 	
-	// Parse command-line args
-	String file_to_open = {0};
-	if (argc > 1) {
-		file_to_open = string_from_cstring(argv[1]);
-		editor_load_file(file_to_open);
+	{
+		// Init state
+		arena_init(&state.arena);
+		
+		if (!query_window_size(&state.window_size)) {
+			panic();
+		}
+		
+		{
+			// Init null buffer
+			state.null_buffer = push_type(&state.arena, Editor_Buffer);
+			state.null_buffer->name = string_from_lit("*null*");
+			
+			// There's no point in creating an arena specifically for this buffer.
+			// This is the only buffer that uses the global state's arena for
+			// its allocations.
+			
+			state.null_buffer->first_page = push_type(&state.arena, Editor_Page);
+			state.null_buffer->last_page = state.null_buffer->first_page;
+			state.null_buffer->page_count = 1;
+			
+			state.null_buffer->first_page->lines = push_type(&state.arena, Editor_Line);
+			state.null_buffer->first_page->line_count = 1;
+			state.null_buffer->first_page->line_capacity = 1;
+			state.null_buffer->line_count = 1;
+			
+			state.null_buffer->first_page->lines[0].data = cast(u8 *) "~";
+			state.null_buffer->first_page->lines[0].len = 1;
+			
+			state.null_buffer->is_read_only = true;
+		}
+		
+		state.current_buffer = state.null_buffer;
 	}
 	
-	bool size_ok = query_window_size(&state.window_size);
-	assert(size_ok);
+	{
+		// Parse command-line args
+		if (argc > 1) {
+			String file_name = string_from_cstring(argv[1]);
+			editor_load_file(file_name);
+			
+			state.current_buffer = state.single_buffer;
+		}
+	}
+	
+	assert(state.current_buffer); // Always!
 	
 	// Temporary: decrement the height to stop cursor from moving in the status bar.
 	// TODO: separate render-height and stored-height
@@ -1466,47 +1952,19 @@ int main(int argc, char **argv) {
 	
 	while (true) {
 		
+		assert(state.current_buffer); // Always!
+		
 		editor_update_scroll();
+		
+		Editor_Buffer *curr_buffer = state.current_buffer;
 		
 		{
 			write_buffer_append(&screen_buffer, esc("?25l")); // Hide cursor
 			
 			write_buffer_append(&screen_buffer, get_clear_string()); // Clear screen
 			
-#if 0
-			// Temporary: draw a row
-			// -1 because we don't print in the last column
-			for (int x = 0; x < state.window_size.width - 1; x += 1) {
-				write_buffer_append(&screen_buffer, string_from_lit("~"));
-			}
-			write_buffer_append(&screen_buffer, string_from_lit("\r\n"));
-#endif
-			
-			
-#if 0
 			{
-				// Draw ~ for each row
-				for (int y = 0; y < state.window_size.height; y += 1) {
-					if (y >= state.line_count) {
-						// TODO: Display the welcome message
-						
-						write_buffer_append(&screen_buffer, string_from_lit("~"));
-					} else {
-						i64 to_write = min(state.lines[y].len, state.window_size.width);
-						write_buffer_append(&screen_buffer, string(state.lines[y].data, to_write));
-					}
-					
-					// This doesn't work in Windows terminals, we have to clear the whole screen
-					// using the special code because Windows is a special kid.
-					// write_buffer_append(&screen_buffer, string_from_lit("\x1b[K")); // Clear row
-					if (y < state.window_size.height - 1) {
-						write_buffer_append(&screen_buffer, string_from_lit("\r\n"));
-					}
-				}
-			}
-#else
-			{
-				i64 line_number = state.vscroll; // Absolute line number from the start of the buffer, the first that is visible
+				i64 line_number = curr_buffer->vscroll; // Absolute line number from the start of the buffer, the first that is visible
 				
 				Editor_Relative_Line rel_line = editor_relative_from_absolute_line(line_number);
 				Editor_Page *page = rel_line.page;
@@ -1516,14 +1974,18 @@ int main(int argc, char **argv) {
 				
 				for (int y = 0; y < num_rows_to_draw; y += 1) {
 					if (page && line_relative_to_start_of_page < page->line_count) {
-						// print line
-						Editor_Line *line = &page->lines[line_relative_to_start_of_page];
-						String render_line = editor_render_string_from_stored_string(editor_string_from_line(line));
-						
-						i64 to_write = clamp(0, render_line.len - state.hscroll, state.window_size.width);
-						write_buffer_append(&screen_buffer, string(render_line.data + state.hscroll, to_write));
-						
-						free(render_line.data); // TODO: ARENAS !!!
+						{
+							// Print line
+							Scratch scratch = scratch_begin(0, 0);
+							
+							Editor_Line *line = &page->lines[line_relative_to_start_of_page];
+							String render_line = editor_render_string_from_stored_string(scratch.arena, string_from_editor_line(line));
+							
+							i64 to_write = clamp(0, render_line.len - curr_buffer->hscroll, state.window_size.width);
+							write_buffer_append(&screen_buffer, string(render_line.data + curr_buffer->hscroll, to_write));
+							
+							scratch_end(scratch);
+						}
 						
 						// check for end of page
 						line_relative_to_start_of_page += 1;
@@ -1532,7 +1994,7 @@ int main(int argc, char **argv) {
 							line_relative_to_start_of_page = 0;
 						}
 					} else {
-						if (!state.first_page && y == state.window_size.height / 3) {
+						if (!curr_buffer->first_page && y == state.window_size.height / 3) {
 							
 #define FEDIT_VERSION "1"
 							char welcome[80];
@@ -1565,9 +2027,9 @@ int main(int argc, char **argv) {
 					write_buffer_append(&screen_buffer, esc("7m")); // Invert colors (to draw status bar)
 					
 					char status[80];
-					String buffer_name = state.file_name.len > 0 ? state.file_name : string_from_lit("*none*");
+					String buffer_name = curr_buffer->name;
 					int len = snprintf(status, sizeof(status), "%.*s - %d lines",
-									   string_expand(buffer_name), cast(i32) state.line_count);
+									   string_expand(buffer_name), cast(i32) curr_buffer->line_count);
 					len = min(len, state.window_size.width);
 					write_buffer_append(&screen_buffer, string(cast(u8 *) status, len));
 					
@@ -1578,18 +2040,17 @@ int main(int argc, char **argv) {
 					write_buffer_append(&screen_buffer, esc("m")); // Reset colors
 				}
 			}
-#endif
 			
 			write_buffer_append(&screen_buffer, esc("H")); // Reset cursor
 			
 			// Move cursor
 			char buf[32] = {0};
 			
-			Editor_Line *current_line = editor_line_from_line_number(state.cursor_position.y);
-			i64 cursor_render_x = editor_render_x_from_stored_x(editor_string_from_line(current_line), state.cursor_position.x);
+			Editor_Line *current_line = editor_line_from_line_number(curr_buffer->cursor_position.y);
+			i64 cursor_render_x = editor_render_x_from_stored_x(string_from_editor_line(current_line), curr_buffer->cursor_position.x);
 			
-			i32 cursor_y_on_screen = state.cursor_position.y - cast(i32) state.vscroll; // TODO: Review this cast
-			i32 cursor_x_on_screen = cast(i32) cursor_render_x - cast(i32) state.hscroll; // TODO: Review this cast
+			i32 cursor_y_on_screen = curr_buffer->cursor_position.y - cast(i32) curr_buffer->vscroll; // TODO: Review this cast
+			i32 cursor_x_on_screen = cast(i32) cursor_render_x - cast(i32) curr_buffer->hscroll; // TODO: Review this cast
 			snprintf(buf, sizeof(buf), "\x1b[%d;%dH", cursor_y_on_screen + 1, cursor_x_on_screen + 1);
 			write_buffer_append(&screen_buffer, string_from_cstring(buf));
 			
@@ -1598,8 +2059,9 @@ int main(int argc, char **argv) {
 			write_buffer_flush(&screen_buffer);
 		}
 		
-		size_ok = query_window_size(&state.window_size);
-		assert(size_ok);
+		if (!query_window_size(&state.window_size)) {
+			panic();
+		}
 		
 		Editor_Key key = wait_for_key();
 		switch (key) {
@@ -1624,12 +2086,12 @@ int main(int argc, char **argv) {
 			} break;
 			
 			case Editor_Key_HOME: {
-				state.cursor_position.x = 0;
+				curr_buffer->cursor_position.x = 0;
 			} break;
 			
 			case Editor_Key_END: {
-				Editor_Line *current_line = editor_line_from_line_number(state.cursor_position.y);
-				state.cursor_position.x = cast(i32) current_line->len;
+				Editor_Line *current_line = editor_line_from_line_number(curr_buffer->cursor_position.y);
+				curr_buffer->cursor_position.x = cast(i32) current_line->len;
 			} break;
 		}
 	}
