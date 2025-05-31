@@ -483,7 +483,7 @@ editor_init_buffer_contents(Editor_Buffer *buffer, SliceU8 contents) {
 	buffer->first_free_page = NULL;
 	buffer->first_free_span = NULL;
 	
-	Editor_Page *page;
+	Editor_Page *page = NULL;
 	{
 		page = push_type(&buffer->arena, Editor_Page);
 		page->line_count = 0;
@@ -526,11 +526,14 @@ editor_init_buffer_contents(Editor_Buffer *buffer, SliceU8 contents) {
 			i64 copied = 0;
 			
 			while (copied < line_len || !line->first_span) {
+				// Push new span
 				Editor_Span *span = push_type(&buffer->arena, Editor_Span);
-				queue_push(line->first_span, line->last_span, span);
-				
 				span->data = push_array(&buffer->arena, u8, EDITOR_SPAN_SIZE);
 				
+				// Insert span
+				queue_push(line->first_span, line->last_span, span);
+				
+				// Fill span
 				i64 to_copy = line_len - copied;
 				i64 to_copy_now = min(to_copy, EDITOR_SPAN_SIZE);
 				memcpy(span->data, contents.data + line_start + copied, to_copy_now);
@@ -824,8 +827,124 @@ int main(int argc, char **argv) {
 				allow_break();
 			} break;
 			
+			case '\n': {
+				//- Split line
+				
+				Editor_Buffer *buffer = state.current_buffer;
+				if (!buffer->is_read_only) {
+					
+					// Get all the variables
+					Editor_Page *current_page = NULL;
+					Editor_Line *current_line = NULL;
+					i64 line_in_page = 0;
+					
+					{
+						Editor_Relative_Line rel = editor_relative_from_absolute_line(buffer->cursor_position.y);
+						current_page = rel.page;
+						current_line = &current_page->lines[rel.line];
+						line_in_page = rel.line;
+					}
+					
+					Editor_Span *current_span = NULL;
+					i64 at_in_span = 0;
+					
+					{
+						Editor_Relative_Span rels = editor_relative_span_from_line_and_pos(current_line, buffer->cursor_position.x);
+						current_span = rels.span;
+						at_in_span   = rels.at;
+					}
+					
+					bool insert_before = false;
+					if (current_page->line_count == EDITOR_PAGE_SIZE) {
+						// Allocate new page, to be placed after this one
+						Editor_Page *new_page = NULL;
+						if (buffer->first_free_page) {
+							// Get from free-list
+							new_page = stack_pop(buffer->first_free_page);
+							new_page->next = NULL;
+							new_page->prev = NULL;
+							new_page->line_count = 0;
+						} else {
+							// Push new page
+							new_page = push_type(&buffer->arena, Editor_Page);
+							new_page->lines = push_array(&buffer->arena, Editor_Line, EDITOR_PAGE_SIZE);
+						}
+						
+						// Insert page
+						dll_insert(buffer->first_page, buffer->last_page, current_page, new_page);
+						
+						// Copy last line into new page
+						new_page->lines[0] = current_page->lines[EDITOR_PAGE_SIZE - 1];
+						new_page->line_count += 1;
+						
+						current_page->line_count -= 1;
+					} else {
+						assert(line_in_page <= EDITOR_PAGE_SIZE);
+					}
+					
+					// Shift all the lines of this page
+					i64 lines_after_cursor = EDITOR_PAGE_SIZE - line_in_page - 1;
+					memmove(current_page->lines + line_in_page + 1, current_page->lines + line_in_page, lines_after_cursor * sizeof(Editor_Line));
+					
+					Editor_Page *original_page = current_page; // For debugging only
+					(void)original_page;
+					
+					// Fix for when the cursor is exactly on the last line of a page:
+					// Undo some of the changes and pretend that the new page is the current page
+					//
+					// Feels like a @Hack but it works... ? I don't really like how I added
+					// 'insert_before' but it seems like the only way.
+					if (line_in_page == EDITOR_PAGE_SIZE - 1) {
+						current_page->line_count += 1;
+						current_page = current_page->next;
+						current_page->line_count -= 1;
+						memset(&current_page->lines[0], 0, sizeof(Editor_Line));
+						line_in_page = 0;
+						insert_before = true;
+					}
+					
+					// Alloc new span
+					Editor_Span *new_span = NULL;
+					{
+						if (buffer->first_free_span) {
+							// Get from free-list
+							new_span = stack_pop(buffer->first_free_span);
+							memset(new_span->data, 0, EDITOR_SPAN_SIZE);
+							new_span->next = NULL;
+							new_span->len  = 0;
+						} else {
+							// Push new span
+							new_span = push_type(&buffer->arena, Editor_Span);
+							new_span->data = push_array(&buffer->arena, u8, EDITOR_SPAN_SIZE);
+						}
+					}
+					
+					// Copy chars after cursor to new span and truncate the current span
+					i64 chars_after_cursor = current_span->len - at_in_span;
+					memcpy(new_span->data, current_span->data + at_in_span, chars_after_cursor);
+					new_span->len = chars_after_cursor;
+					
+					// Truncate current line
+					current_span->next = NULL;
+					current_span->len  = at_in_span;
+					
+					// Insert new span into the current page
+					if (insert_before) {
+						current_page->lines[line_in_page+0].first_span = new_span;
+					} else {
+						current_page->lines[line_in_page+1].first_span = new_span;
+					}
+					current_page->line_count += 1;
+					buffer->line_count += 1;
+					
+					// Reposition cursor
+					editor_move_cursor(Editor_Key_ARROW_DOWN);
+					state.current_buffer->cursor_position.x = 0; // Copy the behaviour of the HOME key
+				}
+			} break;
+			
 			default: {
-				if (isprint(key)) {
+				if (isprint(key) && !state.current_buffer->is_read_only) {
 #if 0
 					char c = cast(char) key;
 					
@@ -840,97 +959,6 @@ int main(int argc, char **argv) {
 					
 					allow_break();
 #endif
-				} else if (key == '\n') {
-					//- Split line
-					
-					Editor_Buffer *buffer = state.current_buffer;
-					if (!buffer->is_read_only) {
-						Editor_Relative_Line rel = editor_relative_from_absolute_line(buffer->cursor_position.y);
-						
-						Editor_Page *current_page = rel.page;
-						Editor_Line *current_line = &current_page->lines[rel.line];
-						i64 relative_cursor_line = rel.line;
-						
-						i64 at = buffer->cursor_position.x;
-						Editor_Relative_Span rels = editor_relative_span_from_line_and_pos(current_line, at);
-						Editor_Span *current_span = rels.span;
-						
-						bool insert_before = false;
-						if (current_page->line_count == EDITOR_PAGE_SIZE) {
-							// Allocate new page after this one
-							Editor_Page *new_page;
-							if (buffer->first_free_page) {
-								new_page = stack_pop(buffer->first_free_page);
-								new_page->next = NULL;
-								new_page->prev = NULL;
-								new_page->line_count = 0;
-							} else {
-								new_page = push_type(&buffer->arena, Editor_Page);
-								new_page->lines = push_array(&buffer->arena, Editor_Line, EDITOR_PAGE_SIZE);
-							}
-							
-							// Insert page
-							dll_insert(buffer->first_page, buffer->last_page, current_page, new_page);
-							
-							// Copy last line into new page
-							new_page->lines[0] = current_page->lines[EDITOR_PAGE_SIZE - 1];
-							new_page->line_count += 1;
-							
-							current_page->line_count -= 1;
-							
-						} else {
-							assert(relative_cursor_line <= EDITOR_PAGE_SIZE);
-						}
-						
-						// Shift all the lines of this page
-						i64 lines_after_cursor = EDITOR_PAGE_SIZE - relative_cursor_line - 1;
-						memmove(current_page->lines + relative_cursor_line + 1, current_page->lines + relative_cursor_line, lines_after_cursor * sizeof(Editor_Line));
-						
-						if (relative_cursor_line == EDITOR_PAGE_SIZE - 1) {
-							current_page->line_count += 1;
-							current_page = current_page->next;
-							current_page->line_count -= 1;
-							memset(&current_page->lines[0], 0, sizeof(Editor_Line));
-							relative_cursor_line = 0;
-							insert_before = true;
-							// @Hack?
-						}
-						
-						// Alloc new span
-						Editor_Span *new_span;
-						if (buffer->first_free_span) {
-							new_span = stack_pop(buffer->first_free_span);
-							memset(new_span->data, 0, EDITOR_SPAN_SIZE);
-							new_span->next = NULL;
-							new_span->len  = 0;
-						} else {
-							new_span = push_type(&buffer->arena, Editor_Span);
-							new_span->data = push_array(&buffer->arena, u8, EDITOR_SPAN_SIZE);
-						}
-						
-						// Copy data
-						i64 at_in_span = rels.at;
-						i64 after_in_span = current_span->len - at_in_span;
-						memcpy(new_span->data, current_span->data + at_in_span, after_in_span);
-						current_span->len = at_in_span;
-						
-						// memmove(current_span->data, current_span->data + at_in_span, after_in_span);
-						new_span->len = after_in_span;
-						
-						// Insert span
-						current_span->next = NULL;
-						if (insert_before) {
-							current_page->lines[relative_cursor_line].first_span = new_span;
-						} else {
-							current_page->lines[relative_cursor_line+1].first_span = new_span;
-						}
-						current_page->line_count += 1;
-						buffer->line_count += 1;
-						
-						// Reposition cursor
-						editor_move_cursor(Editor_Key_ARROW_DOWN);
-						state.current_buffer->cursor_position.x = 0; // Copy the behaviour of HOME
-					}
 				}
 			} break;
 		}
