@@ -1527,9 +1527,8 @@ static bool
 query_cursor_position(Point *position) {
 	bool ok = false;
 	
-	// TODO: When we set the cursor position with the escape codes, the position is 1-based
+	// When we set the cursor position with the escape codes, the position is 1-based
 	// When we query it with this API, it is 0-based.
-	// Change this to use escape codes like the Linux version.
 	
 #if 0
 	
@@ -1607,6 +1606,11 @@ query_window_size(Size *size) {
 //   https://stackoverflow.com/questions/6486289/how-to-clear-the-console-in-c
 //   https://stackoverflow.com/questions/5866529/how-do-we-clear-the-console-in-assembly/5866648#5866648
 
+static String
+get_clear_string(void) {
+	return string_from_lit("\033[H\033[J");
+}
+
 #define WIN32_CLEAR_USING_ESCAPE_CODES 1
 
 static void
@@ -1633,118 +1637,8 @@ clear(void) {
 	
 }
 
-static String
-get_clear_string(void) {
-	return string_from_lit("\033[H\033[J");
-}
-
-#if 0
-static bool
-_read_console_char_with_timeout(char *c, int *n) {
-	bool ok = false;
-	
-	while (true) {
-		DWORD wres = WSAWaitForMultipleEvents(1, &stdin_handle, FALSE, 100, TRUE);
-		if (wres == WSA_WAIT_TIMEOUT) {
-			ok = true;
-			*n = 0;
-			break;
-		}
-		
-		if (wres == WSA_WAIT_EVENT_0) {
-			
-			INPUT_RECORD record;
-			DWORD numRead;
-			
-			if (ReadConsoleInput(GetStdHandle(STD_INPUT_HANDLE), &record, 1, &numRead)) {
-				assert(numRead > 0); // Because we're in the WSA_WAIT_EVENT_0 case.
-				
-				if (record.EventType == KEY_EVENT &&
-					record.Event.KeyEvent.bKeyDown) {
-					*c = record.Event.KeyEvent.uChar.AsciiChar;
-					*n = 1;
-					ok = true;
-					break;
-				} // else: just keep spinning, spinning, spinning...
-			} else {
-				// It's an error, break the loop without setting 'ok' to true.
-				break;
-			}
-		}
-	}
-	
-	return ok;
-}
-#endif
-
 static Editor_Key
 wait_for_key(void) {
-	
-#if 0
-	INPUT_RECORD rec = {0};
-	DWORD recn = 0;
-	BOOL peek_ok = PeekConsoleInput(stdin_handle, &rec, 1, &recn);
-	
-	char c = 0;
-	if (peek_ok) {
-		allow_break();
-	}
-	if (peek_ok && recn > 0) {
-		allow_break();
-	}
-	
-	if (peek_ok && recn > 0) {
-		if (rec.EventType == KEY_EVENT) {
-			DWORD n = 0;
-			BOOL ok = ReadConsole(stdin_handle, &c, 1, &n, NULL);
-			assert(ok); // TODO: What to do?
-		} else {
-			BOOL read_ok = ReadConsoleInput(stdin_handle, &rec, 1, &recn);
-			assert(read_ok); // Temporary
-		}
-	} else {
-		assert(peek_ok); // Temporary
-	}
-#elif 0
-	
-	/*
-while (true) {
-  PeekConsoleInput(&rec, &nrec)
-if (nrec > 0 && rec.kind == KEY) break; // If there's one key event, break
-}
-
-ReadConsoleInput(&rec, &nrec);
-
-if rec.key == '\x1b' {
-while(true) {
-PeekConsoleInput(&rec, &nrec)
-if nrec == 0 break
-if rec.kind == KEY {
-seq[i++] = rec.key
-}
-}
-
-if seq[0] blah ...
-}
-*/
-	
-	INPUT_RECORD rec = {0};
-	DWORD nrec = 0;
-	while (true) {
-		if (PeekConsoleInput(stdin_handle, &rec, 1, &nrec)) {
-			if (nrec > 0 && rec.EventType == KEY_EVENT) break;
-		} else {
-			panic(); // Temporary; TODO: What to do?
-		}
-	}
-	
-	if (ReadConsoleInput(stdin_handle, &rec, 1, &nrec)) {
-		
-	} else {
-		panic(); // Temporary; TODO: What to do?
-	}
-	
-#else
 	
 	// With the help of:
 	//   https://stackoverflow.com/a/22310673
@@ -1777,7 +1671,7 @@ if seq[0] blah ...
 					} // else: just keep spinning, spinning, spinning...
 					
 					// TODO: In case of a window resize, redraw everything?
-					// TODO: If mouse scrolling can't be disable, redraw everything also when
+					// TODO: If mouse scrolling can't be disabled, redraw everything also when
 					// mouse scrolls?
 				} else {
 					// It's an error, break the loop without setting 'ok' to true.
@@ -1794,22 +1688,20 @@ if seq[0] blah ...
 	
 	Editor_Key key = 0;
 	switch (record.Event.KeyEvent.wVirtualKeyCode) {
-		case VK_UP: key = Editor_Key_ARROW_UP;    break;
-		case VK_DOWN: key = Editor_Key_ARROW_DOWN;  break;
-		case VK_RIGHT: key = Editor_Key_ARROW_RIGHT; break;
-		case VK_LEFT: key = Editor_Key_ARROW_LEFT;  break;
-		case VK_PRIOR: key = Editor_Key_PAGE_UP; break;
-		case VK_NEXT: key = Editor_Key_PAGE_DOWN; break;
-		case VK_HOME: key = Editor_Key_HOME; break;
-		case VK_END: key = Editor_Key_END; break;
-		case VK_DELETE: key = Editor_Key_DELETE; break;
+		case VK_UP:     key = Editor_Key_ARROW_UP;    break;
+		case VK_DOWN:   key = Editor_Key_ARROW_DOWN;  break;
+		case VK_RIGHT:  key = Editor_Key_ARROW_RIGHT; break;
+		case VK_LEFT:   key = Editor_Key_ARROW_LEFT;  break;
+		case VK_PRIOR:  key = Editor_Key_PAGE_UP;     break;
+		case VK_NEXT:   key = Editor_Key_PAGE_DOWN;   break;
+		case VK_HOME:   key = Editor_Key_HOME;        break;
+		case VK_END:    key = Editor_Key_END;         break;
+		case VK_DELETE: key = Editor_Key_DELETE;      break;
 		
 		default: {
 			key = record.Event.KeyEvent.uChar.AsciiChar;
 		} break;
 	}
-	
-#endif
 	
 	return key;
 }
@@ -1820,11 +1712,12 @@ if seq[0] blah ...
 
 typedef struct termios termios;
 typedef struct winsize winsize;
+typedef struct utsname utsname;
 
 //- Linux-specific global variables
 
 static termios original_mode;
-static int wsl_mode;
+static int _wsl_mode;
 
 //- Linux-specific initialization/finalization
 
@@ -1848,8 +1741,7 @@ _wsl_detect(void) {
 	//  2: WSL 2
 	int result = -1;
 	
-#if __has_include(<sys/utsname.h>) // See if it makes sense to check for the header
-	struct utsname buf;
+	utsname buf;
 	if (uname(&buf) == 0) {
 		if (strcmp(buf.sysname, "Linux") != 0) {
 			result = 0;
@@ -1861,14 +1753,13 @@ _wsl_detect(void) {
 			result = 0;
 		}
 	}
-#endif
 	
 	return result;
 }
 
 static void
 before_main(void) {
-	wsl_mode = _wsl_detect();
+	_wsl_mode = _wsl_detect();
 }
 
 static void
@@ -1968,11 +1859,6 @@ query_window_size(Size *size) {
 	return ok;
 }
 
-static void
-clear(void) {
-	write_console_unbuffered(get_clear_string());
-}
-
 static String
 get_clear_string(void) {
 	String result = {0};
@@ -1982,33 +1868,28 @@ get_clear_string(void) {
 	// on Windows terminals, so it wouldn't work in WSL.
 	// The hack doesn't work either, and I have no idea why.
 	
-	switch (wsl_mode) {
+	switch (_wsl_mode) {
 		case 1:
 		case 2: {
-			// printf("\033[H\033[J");
-			
 			result = string(string_from_lit("\033[H\033[J"));
 		} break;
 		
 		case 0: {
-			// write_console_unbuffered(esc("2J")); // Clear screen
-			// write_console_unbuffered(esc("H")); // Reposition cursor
-			
-			result = string_from_lit("\x1b[2J\x1b[H");
+			result = string_from_lit("\x1b[2J" "\x1b[H");
 		} break;
 		
 		default: panic();
 	}
 #else
-	(void)wsl_mode;
-	
-	// write_console_unbuffered(esc("2J")); // Clear screen
-	// write_console_unbuffered(esc("H")); // Reposition cursor
-	
-	result = string_from_lit("\x1b[2J\x1b[H");
+	result = string_from_lit("\x1b[2J" "\x1b[H"); // Clear screen + reset cursor
 #endif
 	
 	return result;
+}
+
+static void
+clear(void) {
+	write_console_unbuffered(get_clear_string());
 }
 
 static Editor_Key
@@ -2074,17 +1955,6 @@ wait_for_key(void) {
 	return key;
 }
 
-#endif
-
-#if 0
-static void
-report_error(char *message) {
-	console_write(cast(u8 *) "\x1b[2J", 4); // Clear screen
-	console_write(cast(u8 *) "\x1b[H", 3); // Reposition cursor
-	
-	// fprintf(stderr, ...);
-	(void)message;
-}
 #endif
 
 int main(int argc, char **argv) {
