@@ -813,6 +813,17 @@ int main(int argc, char **argv) {
 				state.current_buffer->cursor_position.x = cast(i32) editor_line_len(current_line);
 			} break;
 			
+			case Editor_Key_BACKSPACE:
+			case Editor_Key_DELETE:
+			case CTRL_KEY('h'): {
+				
+			} break;
+			
+			case CTRL_KEY('l'):
+			case '\x1b': {
+				allow_break();
+			} break;
+			
 			default: {
 				if (isprint(key)) {
 #if 0

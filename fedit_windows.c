@@ -238,7 +238,9 @@ wait_for_key(void) {
 		case VK_HOME:   key = Editor_Key_HOME;        break;
 		case VK_END:    key = Editor_Key_END;         break;
 		case VK_DELETE: key = Editor_Key_DELETE;      break;
+		case VK_BACK:   key = Editor_Key_BACKSPACE;   break;
 		case VK_RETURN: key = '\n'; break;
+		case VK_ESCAPE: key = '\x1b'; break;
 		
 		default: {
 			key = record.Event.KeyEvent.uChar.AsciiChar;
