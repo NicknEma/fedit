@@ -69,27 +69,23 @@
 //~ System Headers
 
 #if OS_WINDOWS
+
 # define WIN32_LEAN_AND_MEAN
 # include <windows.h>
 # include <winsock2.h>
+
 #elif OS_LINUX
+
 # include <termios.h>
 # include <unistd.h>
 # include <sys/ioctl.h>
 # include <sys/mman.h>
 # include <sys/utsname.h>
+
 #else
+
 # error Platform not supported.
-#endif
 
-#if 0
-#ifndef  __has_include
-# define __has_include(x) 0
-#endif
-
-#if __has_include(<sys/utsname.h>)
-# include <sys/utsname.h> // If it's a standard Linux header, there's no point in checking with __has_include: just check for OS_LINUX
-#endif
 #endif
 
 ////////////////////////////////
@@ -160,7 +156,6 @@ fsize(FILE *fp) {
 
 //- Integer/pointer/array/type manipulations
 
-#define array_count(a) (sizeof(a)/sizeof((a)[0]))
 #define array_count(a) (i64)(sizeof(a)/sizeof((a)[0]))
 
 #define bytes(n)     (   1ULL * n)
@@ -254,7 +249,7 @@ struct Point {
 	i32 y;
 };
 
-//- bit math
+//- Integer math
 
 static bool
 is_power_of_two(u64 i) {
@@ -294,11 +289,18 @@ round_up_to_multiple_of_i64(i64 n, i64 r) {
 ////////////////////////////////
 //~ Memory procedures
 
+static void *mem_reserve(u64 size);
+static void *mem_commit(void *ptr, u64 size);
+static void *mem_reserve_and_commit(u64 size);
+static bool  mem_decommit(void *ptr, u64 size);
+static bool  mem_release(void *ptr, u64 size);
+
 #if OS_WINDOWS
 
 static void *
 mem_reserve(u64 size) {
-	void *result = VirtualAlloc(NULL, size, MEM_RESERVE, PAGE_NOACCESS); // No need to align the size, Windows will do it for us.
+	// No need to align the size to a page boundary, Windows will do it for us.
+	void *result = VirtualAlloc(NULL, size, MEM_RESERVE, PAGE_NOACCESS);
 	assert(result != NULL);
 	
 	return result;
@@ -306,7 +308,8 @@ mem_reserve(u64 size) {
 
 static void *
 mem_commit(void *ptr, u64 size) {
-	void *result = VirtualAlloc(ptr, size, MEM_COMMIT, PAGE_READWRITE); // No need to align the size, Windows will do it for us.
+	// No need to align the size to a page boundary, Windows will do it for us.
+	void *result = VirtualAlloc(ptr, size, MEM_COMMIT, PAGE_READWRITE);
 	assert(result != NULL);
 	
 	return result;
@@ -314,7 +317,8 @@ mem_commit(void *ptr, u64 size) {
 
 static void *
 mem_reserve_and_commit(u64 size) {
-	void *result = VirtualAlloc(NULL, size, MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE); // No need to align the size, Windows will do it for us.
+	// No need to align the size to a page boundary, Windows will do it for us.
+	void *result = VirtualAlloc(NULL, size, MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE);
 	assert(result != NULL);
 	
 	return result;
@@ -702,6 +706,9 @@ cstring_from_string(Arena *arena, String s) {
 	return result;
 }
 
+////////////////////////////////
+//~ String Builder
+
 //- String builder types
 
 typedef struct String_Builder String_Builder;
@@ -780,14 +787,14 @@ read_file(Arena *arena, String file_name) {
 			if (read_amount == result.contents.len || feof(handle)) {
 				result.ok = true;
 			} else {
-				// TODO: something
+				// TODO: something. Write to a log queue? Then the caller can read it if necessary
 			}
 		} else {
-			// TODO: something
+			// TODO: something. Write to a log queue? Then the caller can read it if necessary
 		}
 		fclose(handle);
 	} else {
-		// TODO: something
+		// TODO: something. Write to a log queue? Then the caller can read it if necessary
 	}
 	
 	scratch_end(scratch);
@@ -801,6 +808,52 @@ read_file(Arena *arena, String file_name) {
 //- Console platform-specific functions
 
 static void write_console_unbuffered(String s);
+
+#if OS_WINDOWS
+
+static void
+write_console_unbuffered(String s) {
+	i64 written = 0;
+	
+	HANDLE hstdout = GetStdHandle(STD_OUTPUT_HANDLE);
+	while (written < s.len) {
+		i64  desired_nwrite = s.len - written;
+		u32  attempt_nwrite = cast(DWORD) desired_nwrite;
+		DWORD actual_nwrite = 0;
+		if (!WriteConsole(hstdout, s.data + written, attempt_nwrite, &actual_nwrite, NULL)) {
+			int n = GetLastError();
+			(void)n;
+			
+			panic();
+		}
+		
+		written += cast(i64) actual_nwrite;
+	}
+}
+
+#elif OS_LINUX
+
+static void
+write_console_unbuffered(String s) {
+	if (s.len > 0) {
+		int nwrite = write(STDOUT_FILENO, s.data, s.len);
+		if (nwrite != -1) {
+			if (nwrite < s.len) {
+				nwrite = write(STDOUT_FILENO, s.data + nwrite, s.len - nwrite);
+				if (nwrite == -1) {
+					panic(errno);
+				}
+			}
+		} else {
+			panic(errno);
+		}
+	} else {
+		// If writing with a length of 0 to something other than a regular file
+		// the result of write() is unspecified, so we better not do that.
+	}
+}
+
+#endif
 
 ////////////////////////////////
 //~ Editor
@@ -1728,20 +1781,6 @@ if seq[0] blah ...
 	return key;
 }
 
-static void
-write_console_unbuffered(String s) {
-	assert(cast(i64)cast(u32)s.len == s.len); // If false, the length is not supported
-	
-	DWORD len_written = 0;
-	BOOL ok = WriteConsole(stdout_handle, s.data, cast(u32)s.len, &len_written, NULL);
-	if (!ok) {
-		int n = GetLastError();
-		(void)n;
-		
-		assert(0);
-	}
-}
-
 #elif OS_LINUX
 
 //- Linux-specific types
@@ -2000,12 +2039,6 @@ wait_for_key(void) {
 	}
 	
 	return key;
-}
-
-static void
-write_console_unbuffered(String s) {
-	int nwrite = write(STDOUT_FILENO, s.data, s.len);
-	(void)nwrite;
 }
 
 #endif
