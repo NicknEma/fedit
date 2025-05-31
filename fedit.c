@@ -1100,16 +1100,31 @@ editor_get_current_line() {
 
 static void
 editor_validate_buffer(Editor_Buffer *buffer) {
-	i64 line_count = 0;
-	
-	Editor_Page *page = buffer->first_page;
-	while (page) {
-		line_count += page->line_count;
-		page = page->next;
+	{
+		// Check that global line-count is valid
+		i64 line_count = 0;
+		
+		Editor_Page *page = buffer->first_page;
+		while (page) {
+			line_count += page->line_count;
+			page = page->next;
+		}
+		
+		assert(line_count == buffer->line_count);
+		assert(line_count > 0);
 	}
 	
-	assert(line_count == buffer->line_count);
-	assert(line_count > 0);
+	{
+		// Check that each line has at least a span
+		Editor_Page *page = buffer->first_page;
+		while (page) {
+			for (i64 line_index = 0; line_index < page->line_count; line_index += 1) {
+				assert(page->lines[line_index].first_span);
+				assert(page->lines[line_index].last_span);
+			}
+			page = page->next;
+		}
+	}
 	
 	allow_break();
 }
