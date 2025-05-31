@@ -99,6 +99,7 @@
 #include <stdio.h>
 #include <ctype.h>
 #include <errno.h>
+#include <time.h>
 
 #ifdef min
 # undef min
@@ -698,6 +699,12 @@ string_clone(Arena *arena, String s) {
 	return result;
 }
 
+static String
+string_clone_buffer(u8 *buffer, i64 buffer_len, String s) {
+	memcpy(buffer, s.data, min(buffer_len, s.len));
+	return string(buffer, min(buffer_len, s.len));
+}
+
 static char *
 cstring_from_string(Arena *arena, String s) {
 	char *result = push_nozero(arena, (s.len + 1) * sizeof(char));
@@ -932,6 +939,10 @@ struct Editor_State {
 	
 	Size window_size;
 	
+	String status_message;
+	u8 status_message_buffer[64];
+	time_t status_message_timestamp;
+	
 	Editor_Buffer *current_buffer;
 	Editor_Buffer *single_buffer;
 	Editor_Buffer *null_buffer;
@@ -962,6 +973,7 @@ static Editor_Line *editor_line_from_line_number(i64 line_number);
 
 static void editor_move_cursor(Editor_Key key);
 static void editor_update_scroll(void);
+static void editor_set_status_message(String message);
 
 static void editor_render_buffer(Editor_Buffer *buffer);
 static String editor_render_string_from_stored_string(Arena *arena, String stored_string);
@@ -1118,7 +1130,7 @@ editor_render_buffer(Editor_Buffer *buffer) {
 		Editor_Page *page = rel_line.page;
 		i64 line_relative_to_start_of_page = rel_line.line;
 		
-		int num_rows_to_draw = state.window_size.height;
+		int num_rows_to_draw = state.window_size.height - 2; // Subtract the status bar and the status message
 		
 		for (int y = 0; y < num_rows_to_draw; y += 1) {
 			if (page && line_relative_to_start_of_page < page->line_count) {
@@ -1188,6 +1200,17 @@ editor_render_buffer(Editor_Buffer *buffer) {
 			}
 			
 			string_builder_append(&builder, esc_reset_colors);
+		}
+		
+		{
+			// Draw status message:
+			
+			string_builder_append(&builder, string_from_lit("\r\n"));
+			
+			i64 to_write = min(state.status_message.len, state.window_size.width);
+			if (time(NULL) - state.status_message_timestamp < 5) {
+				string_builder_append(&builder, string(state.status_message.data, to_write));
+			}
 		}
 	}
 	
@@ -1359,8 +1382,8 @@ editor_update_scroll(void) {
 	if (curr_buffer->cursor_position.y < curr_buffer->vscroll) {
 		curr_buffer->vscroll = curr_buffer->cursor_position.y;
 	}
-	if (curr_buffer->cursor_position.y >= curr_buffer->vscroll + state.window_size.height) {
-		curr_buffer->vscroll = curr_buffer->cursor_position.y - state.window_size.height + 1;
+	if (curr_buffer->cursor_position.y >= curr_buffer->vscroll + (state.window_size.height - 2)) {
+		curr_buffer->vscroll = curr_buffer->cursor_position.y - (state.window_size.height - 2) + 1;
 	}
 	
 	Editor_Line *current_line = editor_line_from_line_number(curr_buffer->cursor_position.y);
@@ -1427,6 +1450,14 @@ editor_move_cursor(Editor_Key key) {
 	}
 }
 
+//- Editor misc functions
+
+static void
+editor_set_status_message(String message) {
+	state.status_message = string_clone_buffer(state.status_message_buffer, sizeof(state.status_message_buffer), message);
+	state.status_message_timestamp = time(NULL);
+}
+
 #if OS_WINDOWS
 
 //- Windows-specific global variables
@@ -1462,7 +1493,7 @@ enable_raw_mode(void) {
 			// TODO: Set errno + call perror()
 			exit_code = 1;
 			
-			assert(0); // Temporary
+			panic(); // Temporary
 		}
 	} else {
 		int n = GetLastError();
@@ -1470,7 +1501,7 @@ enable_raw_mode(void) {
 		// TODO: Set errno + call perror()
 		exit_code = 1;
 		
-		assert(0); // Temporary
+		panic(); // Temporary
 	}
 	
 	if (GetConsoleMode(stdout_handle, &original_stdout_mode)) {
@@ -1478,10 +1509,10 @@ enable_raw_mode(void) {
 		mode |= (ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 		
 		if (!SetConsoleMode(stdout_handle, mode)) {
-			assert(0); // Temporary
+			panic(); // Temporary
 		}
 	} else {
-		assert(0); // Temporary
+		panic(); // Temporary
 	}
 }
 
@@ -1511,7 +1542,7 @@ query_cursor_position(Point *position) {
 		// As a fallback method, we could do what Linux does: send a 'n' command
 		// and parse the response. I don't know if it makes sense though, for Windows
 		
-		assert(0); // Temporary
+		panic(); // Temporary
 	}
 	
 #else
@@ -1557,11 +1588,13 @@ query_window_size(Size *size) {
 	
 	CONSOLE_SCREEN_BUFFER_INFO info = {0};
 	if (GetConsoleScreenBufferInfo(stdout_handle, &info)) {
-		size->width  = info.srWindow.Right - info.srWindow.Left;
-		size->height = info.srWindow.Bottom - info.srWindow.Top;
+		// The reason we don't use the dwSize member of the struct is because that
+		// contains the size of the *buffer* (so even stuff we scrolled past).
+		size->width  = info.srWindow.Right - info.srWindow.Left + 1;
+		size->height = info.srWindow.Bottom - info.srWindow.Top + 1;
 		ok = true;
 	} else {
-		assert(0); // Temporary
+		panic(); // Temporary
 	}
 	
 	return ok;
@@ -1701,14 +1734,14 @@ if seq[0] blah ...
 		if (PeekConsoleInput(stdin_handle, &rec, 1, &nrec)) {
 			if (nrec > 0 && rec.EventType == KEY_EVENT) break;
 		} else {
-			assert(0); // Temporary; TODO: What to do?
+			panic(); // Temporary; TODO: What to do?
 		}
 	}
 	
 	if (ReadConsoleInput(stdin_handle, &rec, 1, &nrec)) {
 		
 	} else {
-		assert(0); // Temporary; TODO: What to do?
+		panic(); // Temporary; TODO: What to do?
 	}
 	
 #else
@@ -1753,7 +1786,7 @@ if seq[0] blah ...
 			}
 		}
 		
-		if (!ok) { assert(0); }
+		if (!ok) { panic(); }
 		if (n > 0) break;
 	}
 	
@@ -1854,13 +1887,13 @@ enable_raw_mode(void) {
 			perror("tsgetattr");
 			exit_code = 1;
 			
-			assert(0); // Temporary
+			panic(); // Temporary
 		}
 	} else {
 		perror("tcgetattr");
 		exit_code = 1;
 		
-		assert(0); // Temporary
+		panic(); // Temporary
 	}
 }
 
@@ -1929,7 +1962,7 @@ query_window_size(Size *size) {
 			ok = true;
 		}
 	} else {
-		assert(0); // Temporary
+		panic(); // Temporary
 	}
 	
 	return ok;
@@ -1964,7 +1997,7 @@ get_clear_string(void) {
 			result = string_from_lit("\x1b[2J\x1b[H");
 		} break;
 		
-		default: assert(0);
+		default: panic();
 	}
 #else
 	(void)wsl_mode;
@@ -1988,7 +2021,7 @@ wait_for_key(void) {
 		
 		if (nread == -1 && errno != EAGAIN) {
 			// See note on the tutorial about EAGAIN on Cygwin.
-			assert(0); // read failed - Temporary; TODO: What to do? The tutorial just quits; NOTE: Maybe set a global 'should_quit' variable
+			panic(); // read failed - Temporary; TODO: What to do? The tutorial just quits; NOTE: Maybe set a global 'should_quit' variable
 		}
 	}
 	
@@ -2108,6 +2141,8 @@ int main(int argc, char **argv) {
 	}
 	
 	assert(state.current_buffer); // Always!
+	
+	editor_set_status_message(string_from_lit("Ctrl-Q to quit"));
 	
 	while (true) {
 		assert(state.current_buffer); // Always!
