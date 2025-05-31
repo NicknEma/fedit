@@ -873,8 +873,8 @@ write_console_unbuffered(String s) {
 
 #define esc(code) string_from_lit(ESCAPE_PREFIX code)
 
-#define EDITOR_DEFAULT_LINE_SIZE 64
-#define EDITOR_DEFAULT_PAGE_SIZE 64
+#define EDITOR_SPAN_SIZE 64
+#define EDITOR_PAGE_SIZE 128
 
 #define EDITOR_TAB_WIDTH 4
 
@@ -893,13 +893,18 @@ enum Editor_Key {
 };
 typedef enum Editor_Key Editor_Key;
 
+typedef struct Editor_Span Editor_Span;
+struct Editor_Span {
+	Editor_Span *next;
+	
+	u8  *data;
+	i64  len;
+};
+
 typedef struct Editor_Line Editor_Line;
 struct Editor_Line {
-	Editor_Line *next; // For the free-list
-	
-	i64  len;
-	i64  cap;
-	u8  *data;
+	Editor_Span *first_span;
+	Editor_Span *last_span;
 };
 
 typedef struct Editor_Page Editor_Page;
@@ -909,7 +914,6 @@ struct Editor_Page {
 	
 	Editor_Line *lines;
 	i64 line_count;
-	i64 line_capacity;
 };
 
 typedef struct Editor_Buffer Editor_Buffer;
@@ -930,7 +934,7 @@ struct Editor_Buffer {
 	i64 hscroll;
 	
 	Editor_Page *first_free_page;
-	Editor_Line *first_free_line;
+	Editor_Span *first_free_span;
 };
 
 typedef struct Editor_State Editor_State;
@@ -967,9 +971,11 @@ static void editor_init_buffer_contents(Editor_Buffer *buffer, SliceU8 contents)
 static void editor_load_file(String file_name);
 static bool editor_buffer_is_in_use(Editor_Buffer *buffer);
 
-static String string_from_editor_line(Editor_Line *line);
+// static String string_from_editor_line(Editor_Line *line);
+static String string_from_editor_line(Arena *arena, Editor_Line *line);
 static Editor_Relative_Line editor_relative_from_absolute_line(i64 absolute_line);
 static Editor_Line *editor_line_from_line_number(i64 line_number);
+static Editor_Line *editor_get_current_line();
 
 static void editor_move_cursor(Editor_Key key);
 static void editor_update_scroll(void);
@@ -993,10 +999,68 @@ static Editor_Key wait_for_key(void);
 
 //- Editor helper functions
 
+#if 0
 static String
 string_from_editor_line(Editor_Line *line) {
 	return string(line->data, line->len);
 }
+#else
+static i64
+editor_line_len(Editor_Line *line) {
+	i64 len = 0;
+	Editor_Span *span = line->first_span;
+	while (span) {
+		len += span->len;
+		span = span->next;
+	}
+	return len;
+}
+
+static String
+string_from_editor_line(Arena *arena, Editor_Line *line) {
+	i64 len = editor_line_len(line);
+	String result = push_string(arena, len);
+	i64 at = 0;
+	Editor_Span *span = line->first_span;
+	while (span) {
+		memcpy(result.data + at, span->data, span->len);
+		at += span->len;
+		
+		span = span->next;
+	}
+	return result;
+}
+
+typedef struct Editor_Relative_Span Editor_Relative_Span;
+struct Editor_Relative_Span {
+	Editor_Span *span;
+	i64 at;
+};
+
+static Editor_Relative_Span
+editor_relative_span_from_line_and_pos(Editor_Line *line, i64 pos) {
+	Editor_Relative_Span result = {0};
+	
+	Editor_Span *span = line->first_span;
+	while (span) {
+		if (pos < span->len + 1) {
+			result.span = span;
+			result.at = pos;
+			break;
+		}
+		
+		pos -= span->len;
+		span = span->next;
+	}
+	
+	assert(result.span && result.span->data);
+	
+	return result;
+}
+
+#endif
+
+
 
 static Editor_Relative_Line
 editor_relative_from_absolute_line(i64 absolute_line) {
@@ -1025,6 +1089,11 @@ editor_line_from_line_number(i64 line_number) {
 	Editor_Relative_Line rel = editor_relative_from_absolute_line(line_number);
 	Editor_Line *result = &rel.page->lines[rel.line];
 	return result;
+}
+
+static Editor_Line *
+editor_get_current_line() {
+	return editor_line_from_line_number(state.current_buffer->cursor_position.y);
 }
 
 //- Editor debug functions
@@ -1137,7 +1206,7 @@ editor_render_buffer(Editor_Buffer *buffer) {
 				{
 					// Print line
 					Editor_Line *line = &page->lines[line_relative_to_start_of_page];
-					String render_line = editor_render_string_from_stored_string(scratch.arena, string_from_editor_line(line));
+					String render_line = editor_render_string_from_stored_string(scratch.arena, string_from_editor_line(scratch.arena, line));
 					
 					i64 to_write = clamp(0, render_line.len - buffer->hscroll, state.window_size.width);
 					string_builder_append(&builder, string(render_line.data + buffer->hscroll, to_write));
@@ -1220,7 +1289,7 @@ editor_render_buffer(Editor_Buffer *buffer) {
 	char buf[32] = {0};
 	
 	Editor_Line *current_line = editor_line_from_line_number(buffer->cursor_position.y);
-	i64 cursor_render_x = editor_render_x_from_stored_x(string_from_editor_line(current_line), buffer->cursor_position.x);
+	i64 cursor_render_x = editor_render_x_from_stored_x(string_from_editor_line(scratch.arena, current_line), buffer->cursor_position.x);
 	
 	i32 cursor_y_on_screen = buffer->cursor_position.y - cast(i32) buffer->vscroll; // TODO: Review this cast
 	i32 cursor_x_on_screen = cast(i32) cursor_render_x - cast(i32) buffer->hscroll; // TODO: Review this cast
@@ -1257,15 +1326,15 @@ editor_init_buffer_contents(Editor_Buffer *buffer, SliceU8 contents) {
 	buffer->first_page = NULL;
 	buffer->last_page  = NULL;
 	buffer->first_free_page = NULL;
-	buffer->first_free_line = NULL;
+	buffer->first_free_span = NULL;
 	
 	Editor_Page *page;
 	{
 		page = push_type(&buffer->arena, Editor_Page);
-		page->line_count    = 0;
-		page->line_capacity = EDITOR_DEFAULT_PAGE_SIZE;
-		page->lines = push_array(&buffer->arena, Editor_Line, page->line_capacity);
+		page->line_count = 0;
+		page->lines = push_array(&buffer->arena, Editor_Line, EDITOR_PAGE_SIZE);
 		page->next  = NULL;
+		page->prev  = NULL;
 		dll_push_back(buffer->first_page, buffer->last_page, page);
 		buffer->page_count += 1;
 	}
@@ -1279,12 +1348,12 @@ editor_init_buffer_contents(Editor_Buffer *buffer, SliceU8 contents) {
 			// Get line
 			Editor_Line *line = NULL;
 			{
-				if (page->line_count >= page->line_capacity) {
+				if (page->line_count >= EDITOR_PAGE_SIZE) {
 					page = push_type(&buffer->arena, Editor_Page);
-					page->line_count    = 0;
-					page->line_capacity = EDITOR_DEFAULT_PAGE_SIZE;
-					page->lines = push_array(&buffer->arena, Editor_Line, page->line_capacity);
+					page->line_count = 0;
+					page->lines = push_array(&buffer->arena, Editor_Line, EDITOR_PAGE_SIZE);
 					page->next  = NULL;
+					page->prev  = NULL;
 					dll_push_back(buffer->first_page, buffer->last_page, page);
 					buffer->page_count += 1;
 				}
@@ -1295,13 +1364,47 @@ editor_init_buffer_contents(Editor_Buffer *buffer, SliceU8 contents) {
 			}
 			
 			// Fill line
-			line->next = NULL;
+			line->first_span = NULL;
+			line->last_span = NULL;
 			
-			line->len = line_end - line_start;
-			line->cap = round_up_to_multiple_of_i64(clamp_bot(1, line->len), EDITOR_DEFAULT_LINE_SIZE);
-			line->data = push_array(&buffer->arena, u8, line->cap);
+			i64 line_len = line_end - line_start;
+			i64 copied = 0;
 			
-			memcpy(line->data, contents.data + line_start, line->len);
+#if 0
+			{
+				Editor_Span *span = line->last_span;
+				if (span) {
+					assert(span->data);
+					
+					i64 to_copy = line_len - copied;
+					i64 to_copy_now = min(to_copy, EDITOR_SPAN_SIZE - span->len);
+					memcpy(span->data, contents.data + line_start, to_copy_now);
+					
+					copied += to_copy_now;
+				}
+			}
+#endif
+			
+			if (line_len > 0) {
+				while (copied < line_len) {
+					Editor_Span *span = push_type(&buffer->arena, Editor_Span);
+					queue_push(line->first_span, line->last_span, span);
+					
+					span->data = push_array(&buffer->arena, u8, EDITOR_SPAN_SIZE);
+					
+					i64 to_copy = line_len - copied;
+					i64 to_copy_now = min(to_copy, EDITOR_SPAN_SIZE);
+					memcpy(span->data, contents.data + line_start + copied, to_copy_now);
+					span->len = to_copy_now;
+					
+					copied += to_copy_now;
+				}
+			} else {
+				Editor_Span *span = push_type(&buffer->arena, Editor_Span);
+				queue_push(line->first_span, line->last_span, span);
+				
+				span->data = push_array(&buffer->arena, u8, EDITOR_SPAN_SIZE);
+			}
 			
 			// Prepare for next iteration
 			line_start = line_end + 1;
@@ -1386,8 +1489,10 @@ editor_update_scroll(void) {
 		curr_buffer->vscroll = curr_buffer->cursor_position.y - (state.window_size.height - 2) + 1;
 	}
 	
+	Scratch scratch = scratch_begin(0, 0);
+	
 	Editor_Line *current_line = editor_line_from_line_number(curr_buffer->cursor_position.y);
-	i64 cursor_render_x = editor_render_x_from_stored_x(string_from_editor_line(current_line), curr_buffer->cursor_position.x);
+	i64 cursor_render_x = editor_render_x_from_stored_x(string_from_editor_line(scratch.arena, current_line), curr_buffer->cursor_position.x);
 	
 	// Horizontal scroll
 	if (cursor_render_x < curr_buffer->hscroll) {
@@ -1396,6 +1501,8 @@ editor_update_scroll(void) {
 	if (cursor_render_x >= curr_buffer->hscroll + state.window_size.width) {
 		curr_buffer->hscroll = cursor_render_x - state.window_size.width + 1;
 	}
+	
+	scratch_end(scratch);
 #endif
 	
 }
@@ -1414,13 +1521,13 @@ editor_move_cursor(Editor_Key key) {
 				if (curr_buffer->cursor_position.y > 0) {
 					curr_buffer->cursor_position.y -= 1;
 					Editor_Line *current_line = editor_line_from_line_number(curr_buffer->cursor_position.y);
-					curr_buffer->cursor_position.x = cast(i32) current_line->len;
+					curr_buffer->cursor_position.x = cast(i32) editor_line_len(current_line);
 				}
 			}
 		} break;
 		case Editor_Key_ARROW_RIGHT: {
 			Editor_Line *current_line = editor_line_from_line_number(curr_buffer->cursor_position.y);
-			if (curr_buffer->cursor_position.x < current_line->len) {
+			if (curr_buffer->cursor_position.x < editor_line_len(current_line)) {
 				curr_buffer->cursor_position.x += 1;
 			} else {
 				if (curr_buffer->cursor_position.y < curr_buffer->line_count - 1) {
@@ -1445,8 +1552,8 @@ editor_move_cursor(Editor_Key key) {
 	}
 	
 	Editor_Line *current_line = editor_line_from_line_number(curr_buffer->cursor_position.y);
-	if (curr_buffer->cursor_position.x > current_line->len) {
-		curr_buffer->cursor_position.x = cast(i32) current_line->len;
+	if (curr_buffer->cursor_position.x > editor_line_len(current_line)) {
+		curr_buffer->cursor_position.x = cast(i32) editor_line_len(current_line); // @Speed
 	}
 }
 
@@ -1697,6 +1804,7 @@ wait_for_key(void) {
 		case VK_HOME:   key = Editor_Key_HOME;        break;
 		case VK_END:    key = Editor_Key_END;         break;
 		case VK_DELETE: key = Editor_Key_DELETE;      break;
+		case VK_RETURN: key = '\n'; break;
 		
 		default: {
 			key = record.Event.KeyEvent.uChar.AsciiChar;
@@ -1986,13 +2094,15 @@ int main(int argc, char **argv) {
 			state.null_buffer->last_page = state.null_buffer->first_page;
 			state.null_buffer->page_count = 1;
 			
-			state.null_buffer->first_page->lines = push_type(&state.arena, Editor_Line);
+			state.null_buffer->first_page->lines = push_array(&state.arena, Editor_Line, EDITOR_PAGE_SIZE);
 			state.null_buffer->first_page->line_count = 1;
-			state.null_buffer->first_page->line_capacity = 1;
 			state.null_buffer->line_count = 1;
 			
-			state.null_buffer->first_page->lines[0].data = cast(u8 *) "~";
-			state.null_buffer->first_page->lines[0].len = 1;
+			state.null_buffer->first_page->lines[0].first_span = push_type(&state.arena, Editor_Span);
+			state.null_buffer->first_page->lines[0].last_span = state.null_buffer->first_page->lines[0].first_span;
+			
+			state.null_buffer->first_page->lines[0].first_span->data = cast(u8 *) "~";
+			state.null_buffer->first_page->lines[0].first_span->len = 1;
 			
 			state.null_buffer->is_read_only = true;
 		}
@@ -2053,8 +2163,116 @@ int main(int argc, char **argv) {
 			} break;
 			
 			case Editor_Key_END: {
-				Editor_Line *current_line = editor_line_from_line_number(state.current_buffer->cursor_position.y);
-				state.current_buffer->cursor_position.x = cast(i32) current_line->len;
+				Editor_Line *current_line = editor_get_current_line();
+				state.current_buffer->cursor_position.x = cast(i32) editor_line_len(current_line);
+			} break;
+			
+			default: {
+				if (isprint(key)) {
+#if 0
+					char c = cast(char) key;
+					
+					Editor_Line *current_line = editor_get_current_line();
+					if (current_line->len < current_line->cap) {
+						i64 at = state.current_buffer->cursor_position.x;
+						i64 after = current_line->len - at;
+						memmove(current_line->data + at, current_line->data + at + 1, after);
+						(current_line->data + at)[0] = c;
+						current_line->len += 1;
+					}
+					
+					allow_break();
+#endif
+				} else if (key == '\n') {
+					//- Split line
+					
+					Editor_Buffer *buffer = state.current_buffer;
+					Editor_Relative_Line rel = editor_relative_from_absolute_line(buffer->cursor_position.y);
+					
+					Editor_Page *current_page = rel.page;
+					Editor_Line *current_line = &current_page->lines[rel.line];
+					i64 relative_cursor_line = rel.line;
+					
+					i64 at = buffer->cursor_position.x;
+					Editor_Relative_Span rels = editor_relative_span_from_line_and_pos(current_line, at);
+					Editor_Span *current_span = rels.span;
+					
+					bool insert_before = false;
+					if (current_page->line_count == EDITOR_PAGE_SIZE) {
+						// Allocate new page after this one
+						Editor_Page *new_page;
+						if (buffer->first_free_page) {
+							new_page = stack_pop(buffer->first_free_page);
+							new_page->next = NULL;
+							new_page->prev = NULL;
+							new_page->line_count = 0;
+						} else {
+							new_page = push_type(&buffer->arena, Editor_Page);
+							new_page->lines = push_array(&buffer->arena, Editor_Line, EDITOR_PAGE_SIZE);
+						}
+						
+						// Insert page
+						dll_insert(buffer->first_page, buffer->last_page, current_page, new_page);
+						
+						// Copy last line into new page
+						new_page->lines[0] = current_page->lines[EDITOR_PAGE_SIZE - 1];
+						new_page->line_count += 1;
+						
+						current_page->line_count -= 1;
+						
+					} else {
+						assert(relative_cursor_line <= EDITOR_PAGE_SIZE);
+					}
+					
+					// Shift all the lines of this page
+					i64 lines_after_cursor = EDITOR_PAGE_SIZE - relative_cursor_line - 1;
+					memmove(current_page->lines + relative_cursor_line + 1, current_page->lines + relative_cursor_line, lines_after_cursor * sizeof(Editor_Line));
+					
+					if (relative_cursor_line == EDITOR_PAGE_SIZE - 1) {
+						current_page->line_count += 1;
+						current_page = current_page->next;
+						current_page->line_count -= 1;
+						memset(&current_page->lines[0], 0, sizeof(Editor_Line));
+						relative_cursor_line = 0;
+						insert_before = true;
+						// @Hack?
+					}
+					
+					// Alloc new span
+					Editor_Span *new_span;
+					if (buffer->first_free_span) {
+						new_span = stack_pop(buffer->first_free_span);
+						memset(new_span->data, 0, EDITOR_SPAN_SIZE);
+						new_span->next = NULL;
+						new_span->len  = 0;
+					} else {
+						new_span = push_type(&buffer->arena, Editor_Span);
+						new_span->data = push_array(&buffer->arena, u8, EDITOR_SPAN_SIZE);
+					}
+					
+					// Copy data
+					i64 at_in_span = rels.at;
+					i64 after_in_span = current_span->len - at_in_span;
+					memcpy(new_span->data, current_span->data + at_in_span, after_in_span);
+					current_span->len = at_in_span;
+					
+					// memmove(current_span->data, current_span->data + at_in_span, after_in_span);
+					new_span->len = after_in_span;
+					
+					// Insert span
+					current_span->next = NULL;
+					if (insert_before) {
+						current_page->lines[relative_cursor_line].first_span = new_span;
+					} else {
+						current_page->lines[relative_cursor_line+1].first_span = new_span;
+					}
+					current_page->line_count += 1;
+					buffer->line_count += 1;
+					
+					// Reposition cursor
+					editor_move_cursor(Editor_Key_ARROW_DOWN);
+					state.current_buffer->cursor_position.x = 0; // Copy the behaviour of HOME
+				}
 			} break;
 		}
 	}
