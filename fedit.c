@@ -2016,6 +2016,7 @@ int main(int argc, char **argv) {
 	
 	while (true) {
 		assert(state.current_buffer); // Always!
+		editor_validate_buffer(state.current_buffer); // Always!
 		
 		editor_update_scroll();
 		
