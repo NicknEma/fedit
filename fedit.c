@@ -961,6 +961,12 @@ struct Editor_Relative_Line {
 	i64 line;
 };
 
+typedef struct Editor_Relative_Span Editor_Relative_Span;
+struct Editor_Relative_Span {
+	Editor_Span *span;
+	i64 at;
+};
+
 //- Editor global variables
 
 static int exit_code = 0;
@@ -974,7 +980,7 @@ static void editor_init_buffer_contents(Editor_Buffer *buffer, SliceU8 contents)
 static void editor_load_file(String file_name);
 static bool editor_buffer_is_in_use(Editor_Buffer *buffer);
 
-// static String string_from_editor_line(Editor_Line *line);
+static i64 editor_line_len(Editor_Line *line);
 static String string_from_editor_line(Arena *arena, Editor_Line *line);
 static Editor_Relative_Line editor_relative_from_absolute_line(i64 absolute_line);
 static Editor_Line *editor_line_from_line_number(i64 line_number);
@@ -1002,12 +1008,6 @@ static Editor_Key wait_for_key(void);
 
 //- Editor helper functions
 
-#if 0
-static String
-string_from_editor_line(Editor_Line *line) {
-	return string(line->data, line->len);
-}
-#else
 static i64
 editor_line_len(Editor_Line *line) {
 	i64 len = 0;
@@ -1034,18 +1034,13 @@ string_from_editor_line(Arena *arena, Editor_Line *line) {
 	return result;
 }
 
-typedef struct Editor_Relative_Span Editor_Relative_Span;
-struct Editor_Relative_Span {
-	Editor_Span *span;
-	i64 at;
-};
-
 static Editor_Relative_Span
 editor_relative_span_from_line_and_pos(Editor_Line *line, i64 pos) {
 	Editor_Relative_Span result = {0};
 	
 	Editor_Span *span = line->first_span;
 	while (span) {
+		// We need to add 1 here because empty spans (and therefore empty lines) are allowed.
 		if (pos < span->len + 1) {
 			result.span = span;
 			result.at = pos;
@@ -1061,10 +1056,6 @@ editor_relative_span_from_line_and_pos(Editor_Line *line, i64 pos) {
 	return result;
 }
 
-#endif
-
-
-
 static Editor_Relative_Line
 editor_relative_from_absolute_line(i64 absolute_line) {
 	Editor_Relative_Line result = {0};
@@ -1072,6 +1063,7 @@ editor_relative_from_absolute_line(i64 absolute_line) {
 	i64 line = absolute_line;
 	Editor_Page *page = state.current_buffer->first_page;
 	while (page) {
+		// We *DON'T* add 1 here because a file must contain at least 1 page with at least 1 line.
 		if (line < page->line_count) {
 			result.page = page;
 			result.line = line;
@@ -1127,6 +1119,12 @@ editor_validate_buffer(Editor_Buffer *buffer) {
 			}
 			page = page->next;
 		}
+	}
+	
+	{
+		// Check that first page has at least 1 line
+		Editor_Page *page = buffer->first_page;
+		assert(page->line_count > 0);
 	}
 	
 	allow_break();
@@ -1383,25 +1381,10 @@ editor_init_buffer_contents(Editor_Buffer *buffer, SliceU8 contents) {
 			
 			// Fill line
 			line->first_span = NULL;
-			line->last_span = NULL;
+			line->last_span  = NULL;
 			
 			i64 line_len = line_end - line_start;
 			i64 copied = 0;
-			
-#if 0
-			{
-				Editor_Span *span = line->last_span;
-				if (span) {
-					assert(span->data);
-					
-					i64 to_copy = line_len - copied;
-					i64 to_copy_now = min(to_copy, EDITOR_SPAN_SIZE - span->len);
-					memcpy(span->data, contents.data + line_start, to_copy_now);
-					
-					copied += to_copy_now;
-				}
-			}
-#endif
 			
 			while (copied < line_len || !line->first_span) {
 				Editor_Span *span = push_type(&buffer->arena, Editor_Span);
@@ -1416,6 +1399,8 @@ editor_init_buffer_contents(Editor_Buffer *buffer, SliceU8 contents) {
 				
 				copied += to_copy_now;
 			}
+			
+			assert(editor_line_len(line) == line_len);
 			
 			// Prepare for next iteration
 			line_start = line_end + 1;
@@ -1465,7 +1450,7 @@ editor_load_file(String file_name) {
 static void
 editor_update_scroll(void) {
 	
-	Editor_Buffer *curr_buffer = state.current_buffer;
+	Editor_Buffer *buffer = state.current_buffer;
 	
 #if 0
 	// Scroll by 2
@@ -1493,24 +1478,24 @@ editor_update_scroll(void) {
 	// Simplified, scroll by 1
 	
 	// Vertical scroll
-	if (curr_buffer->cursor_position.y < curr_buffer->vscroll) {
-		curr_buffer->vscroll = curr_buffer->cursor_position.y;
+	if (buffer->cursor_position.y < buffer->vscroll) {
+		buffer->vscroll = buffer->cursor_position.y;
 	}
-	if (curr_buffer->cursor_position.y >= curr_buffer->vscroll + (state.window_size.height - 2)) {
-		curr_buffer->vscroll = curr_buffer->cursor_position.y - (state.window_size.height - 2) + 1;
+	if (buffer->cursor_position.y >= buffer->vscroll + (state.window_size.height - 2)) {
+		buffer->vscroll = buffer->cursor_position.y - (state.window_size.height - 2) + 1;
 	}
 	
 	Scratch scratch = scratch_begin(0, 0);
 	
-	Editor_Line *current_line = editor_line_from_line_number(curr_buffer->cursor_position.y);
-	i64 cursor_render_x = editor_render_x_from_stored_x(string_from_editor_line(scratch.arena, current_line), curr_buffer->cursor_position.x);
+	Editor_Line *line = editor_line_from_line_number(buffer->cursor_position.y);
+	i64 cursor_render_x = editor_render_x_from_stored_x(string_from_editor_line(scratch.arena, line), buffer->cursor_position.x);
 	
 	// Horizontal scroll
-	if (cursor_render_x < curr_buffer->hscroll) {
-		curr_buffer->hscroll = cursor_render_x;
+	if (cursor_render_x < buffer->hscroll) {
+		buffer->hscroll = cursor_render_x;
 	}
-	if (cursor_render_x >= curr_buffer->hscroll + state.window_size.width) {
-		curr_buffer->hscroll = cursor_render_x - state.window_size.width + 1;
+	if (cursor_render_x >= buffer->hscroll + state.window_size.width) {
+		buffer->hscroll = cursor_render_x - state.window_size.width + 1;
 	}
 	
 	scratch_end(scratch);
@@ -1520,51 +1505,56 @@ editor_update_scroll(void) {
 
 static void
 editor_move_cursor(Editor_Key key) {
-	
-	Editor_Buffer *curr_buffer = state.current_buffer;
+	Editor_Buffer *buffer = state.current_buffer;
 	
 	switch (key) {
 		case Editor_Key_ARROW_LEFT: {
-			if (curr_buffer->cursor_position.x > 0) {
-				curr_buffer->cursor_position.x -= 1;
+			if (buffer->cursor_position.x > 0) {
+				buffer->cursor_position.x -= 1;
 			} else {
 				// Move to end of previous line
-				if (curr_buffer->cursor_position.y > 0) {
-					curr_buffer->cursor_position.y -= 1;
-					Editor_Line *current_line = editor_line_from_line_number(curr_buffer->cursor_position.y);
-					curr_buffer->cursor_position.x = cast(i32) editor_line_len(current_line);
+				if (buffer->cursor_position.y > 0) {
+					buffer->cursor_position.y -= 1;
+					Editor_Line *line = editor_line_from_line_number(buffer->cursor_position.y);
+					buffer->cursor_position.x = cast(i32) editor_line_len(line);
 				}
 			}
 		} break;
+		
 		case Editor_Key_ARROW_RIGHT: {
-			Editor_Line *current_line = editor_line_from_line_number(curr_buffer->cursor_position.y);
-			if (curr_buffer->cursor_position.x < editor_line_len(current_line)) {
-				curr_buffer->cursor_position.x += 1;
+			Editor_Line *line = editor_line_from_line_number(buffer->cursor_position.y);
+			if (buffer->cursor_position.x < editor_line_len(line)) {
+				buffer->cursor_position.x += 1;
 			} else {
-				if (curr_buffer->cursor_position.y < curr_buffer->line_count - 1) {
-					curr_buffer->cursor_position.y += 1;
-					curr_buffer->cursor_position.x = 0;
+				// Move to start of next line
+				if (buffer->cursor_position.y < buffer->line_count - 1) {
+					buffer->cursor_position.y += 1;
+					buffer->cursor_position.x = 0;
 				}
 			}
 		} break;
+		
 		case Editor_Key_ARROW_UP: {
-			if (curr_buffer->cursor_position.y > 0) {
-				curr_buffer->cursor_position.y -= 1;
+			if (buffer->cursor_position.y > 0) {
+				buffer->cursor_position.y -= 1;
 			}
 		} break;
+		
 		case Editor_Key_ARROW_DOWN: {
-			if (curr_buffer->cursor_position.y < curr_buffer->line_count - 1) {
-				curr_buffer->cursor_position.y += 1;
+			if (buffer->cursor_position.y < buffer->line_count - 1) {
+				buffer->cursor_position.y += 1;
 			}
 		} break;
+		
 		default: {
-			panic("Invalid switch case");
+			panic("Invalid argument 'key'");
 		}
 	}
 	
-	Editor_Line *current_line = editor_line_from_line_number(curr_buffer->cursor_position.y);
-	if (curr_buffer->cursor_position.x > editor_line_len(current_line)) {
-		curr_buffer->cursor_position.x = cast(i32) editor_line_len(current_line); // @Speed
+	Editor_Line *line = editor_line_from_line_number(buffer->cursor_position.y);
+	i64 line_len = editor_line_len(line);
+	if (buffer->cursor_position.x > line_len) {
+		buffer->cursor_position.x = cast(i32) line_len;
 	}
 }
 
