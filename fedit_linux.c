@@ -245,6 +245,10 @@ wait_for_key(void) {
 		}
 	}
 	
+	if (key == '\r') {
+		key = '\n';
+	}
+	
 	return key;
 }
 
