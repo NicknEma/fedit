@@ -785,7 +785,10 @@ read_file(Arena *arena, String file_name) {
 		if (errno == 0) {
 			result.contents.len  = size;
 			result.contents.data = push_nozero(arena, size * sizeof(u8));
-			assert(result.contents.data); // TODO: Switch to an if-else?
+			
+			if (size > 0) {
+				assert(result.contents.data); // TODO: Switch to an if-else?
+			}
 			
 			i64 read_amount  = fread(result.contents.data,
 									 sizeof(u8),

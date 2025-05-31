@@ -2,5 +2,5 @@
 *.rdi
 *.exe
 fedit
-log.txt
+*.txt
 *.raddbg_project
