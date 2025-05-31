@@ -1400,25 +1400,18 @@ editor_init_buffer_contents(Editor_Buffer *buffer, SliceU8 contents) {
 			}
 #endif
 			
-			if (line_len > 0) {
-				while (copied < line_len) {
-					Editor_Span *span = push_type(&buffer->arena, Editor_Span);
-					queue_push(line->first_span, line->last_span, span);
-					
-					span->data = push_array(&buffer->arena, u8, EDITOR_SPAN_SIZE);
-					
-					i64 to_copy = line_len - copied;
-					i64 to_copy_now = min(to_copy, EDITOR_SPAN_SIZE);
-					memcpy(span->data, contents.data + line_start + copied, to_copy_now);
-					span->len = to_copy_now;
-					
-					copied += to_copy_now;
-				}
-			} else {
+			while (copied < line_len || !line->first_span) {
 				Editor_Span *span = push_type(&buffer->arena, Editor_Span);
 				queue_push(line->first_span, line->last_span, span);
 				
 				span->data = push_array(&buffer->arena, u8, EDITOR_SPAN_SIZE);
+				
+				i64 to_copy = line_len - copied;
+				i64 to_copy_now = min(to_copy, EDITOR_SPAN_SIZE);
+				memcpy(span->data, contents.data + line_start + copied, to_copy_now);
+				span->len = to_copy_now;
+				
+				copied += to_copy_now;
 			}
 			
 			// Prepare for next iteration
