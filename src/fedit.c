@@ -6,166 +6,46 @@
 ////////////////////////////////
 //~ Editor
 
+#include "fedit.h"
+
+#if OS_WINDOWS
+# include "fedit_windows.c"
+#elif OS_LINUX
+# include "fedit_linux.c"
+#endif
+
 // TODO: Review all casts
-
-#define ESCAPE_PREFIX "\x1b["
-
-#define CTRL_KEY(k) ((k) & 0x1f)
-
-#define esc(code) string_from_lit(ESCAPE_PREFIX code)
-
-#define EDITOR_SPAN_SIZE 64
-#define EDITOR_PAGE_SIZE 128
-
-#define EDITOR_TAB_WIDTH 4
-
-//- Editor types
-
-enum Editor_Key {
-	Editor_Key_BACKSPACE = 127,
-	Editor_Key_ARROW_UP = 256 + 1,
-	Editor_Key_ARROW_LEFT,
-	Editor_Key_ARROW_DOWN,
-	Editor_Key_ARROW_RIGHT,
-	Editor_Key_PAGE_UP,
-	Editor_Key_PAGE_DOWN,
-	Editor_Key_HOME,
-	Editor_Key_END,
-	Editor_Key_DELETE,
-};
-typedef enum Editor_Key Editor_Key;
-
-typedef struct Editor_Span Editor_Span;
-struct Editor_Span {
-	Editor_Span *next;
-	Editor_Span *prev;
-	
-	u8  *data;
-	i64  len;
-};
-
-typedef struct Editor_Line Editor_Line;
-struct Editor_Line {
-	Editor_Span *first_span;
-	Editor_Span *last_span;
-};
-
-typedef struct Editor_Page Editor_Page;
-struct Editor_Page {
-	Editor_Page *next;
-	Editor_Page *prev;
-	
-	Editor_Line *lines;
-	i64 line_count;
-};
-
-typedef struct Editor_Buffer Editor_Buffer;
-struct Editor_Buffer {
-	bool is_read_only;
-	
-	Arena arena;
-	String name;
-	String file_name;
-	Point cursor_position;
-	
-	Editor_Page *first_page;
-	Editor_Page *last_page;
-	i64 page_count;
-	i64 line_count;
-	
-	i64 vscroll;
-	i64 hscroll;
-	
-	Editor_Page *first_free_page;
-	Editor_Span *first_free_span;
-};
-
-typedef struct Editor_State Editor_State;
-struct Editor_State {
-	Arena arena;
-	
-	Size window_size;
-	
-	String status_message;
-	u8 status_message_buffer[64];
-	time_t status_message_timestamp;
-	
-	Editor_Buffer *current_buffer;
-	Editor_Buffer *single_buffer;
-	Editor_Buffer *null_buffer;
-};
-
-typedef struct Editor_Relative_Line Editor_Relative_Line;
-struct Editor_Relative_Line {
-	Editor_Page *page;
-	i64 line;
-};
-
-typedef struct Editor_Relative_Span Editor_Relative_Span;
-struct Editor_Relative_Span {
-	Editor_Span *span;
-	i64 at;
-};
-
-//- Editor global variables
-
-static int exit_code = 0;
-static Editor_State state;
-
-static FILE *logfile;
-
-//- Editor generic functions (declarations)
-
-static void editor_init_buffer_contents(Editor_Buffer *buffer, SliceU8 contents);
-static void editor_load_file(String file_name);
-static bool editor_buffer_is_in_use(Editor_Buffer *buffer);
-
-static i64 editor_line_len(Editor_Line *line);
-static String string_from_editor_line(Arena *arena, Editor_Line *line);
-static Editor_Relative_Line editor_relative_from_absolute_line(i64 absolute_line);
-static Editor_Line *editor_line_from_line_number(i64 line_number);
-static Editor_Line *editor_get_current_line();
-static Editor_Relative_Span editor_relative_span_from_line_and_pos(Editor_Line *line, i64 pos);
-
-static void editor_move_cursor(Editor_Key key);
-static void editor_update_scroll(void);
-static void editor_set_status_message(String message);
-
-static void editor_render_buffer(Editor_Buffer *buffer);
-static String editor_render_string_from_stored_string(Arena *arena, String stored_string);
-static i64 editor_render_x_from_stored_x(String stored_string, i64 stored_x);
-
-static void editor_validate_buffer(Editor_Buffer *buffer);
-
-//- Editor platform-specific functions (declarations)
-
-static void clear(void);
-static String get_clear_string(void);
-
-static bool query_window_size(Size *size);
-static bool query_cursor_position(Point *position);
-
-static Editor_Key wait_for_key(void);
 
 //- Editor helper functions
 
 static Editor_Span *
+editor_push_span(Arena *arena) {
+	Editor_Span *span;
+	
+	span = push_type(arena, Editor_Span);
+	span->data = push_array(arena, u8, EDITOR_SPAN_SIZE);
+	
+	return span;
+}
+
+static Editor_Span *
 editor_alloc_span(Editor_Buffer *buffer) {
 	Editor_Span *span = NULL;
+	
 	if (buffer->first_free_span) {
-		// Get from free-list
-		span = stack_pop(buffer->first_free_span);
+		span = stack_pop(buffer->first_free_span); // Get from free-list
 		u8   *data = span->data;
 		memset(data, 0, EDITOR_SPAN_SIZE);
 		memset(span, 0, sizeof(Editor_Span));
 		span->data = data;
 	} else {
-		// Push new span
-		span = push_type(&buffer->arena, Editor_Span);
-		span->data = push_array(&buffer->arena, u8, EDITOR_SPAN_SIZE);
+		span = editor_push_span(&buffer->arena); // Push from arena
 	}
+	
 	return span;
 }
+
+//- Buffer modification functions
 
 static Editor_Span *
 editor_span_append_text(Editor_Buffer *buffer, Editor_Line *line, Editor_Span *span, String text) {
@@ -173,21 +53,19 @@ editor_span_append_text(Editor_Buffer *buffer, Editor_Line *line, Editor_Span *s
 	
 	while (appended < text.len) {
 		if (span->len == EDITOR_SPAN_SIZE) {
-			// Alloc new span, to be placed after this one
 			Editor_Span *new_span = editor_alloc_span(buffer);
-			
-			// Insert it after the current one (dll_insert)
 			dll_insert(line->first_span, line->last_span, span, new_span);
 			
 			span = new_span;
 		}
 		
-		i64 space = EDITOR_SPAN_SIZE - span->len;
+		i64 space   = EDITOR_SPAN_SIZE - span->len;
 		i64 to_copy = text.len - appended;
 		i64 to_copy_now = min(space, to_copy);
 		memcpy(span->data + span->len, text.data + appended, to_copy_now);
 		span->len += to_copy_now;
-		appended += to_copy_now;
+		
+		appended  += to_copy_now;
 	}
 	
 	return span;
@@ -199,8 +77,7 @@ editor_span_insert_text(Editor_Buffer *buffer, Editor_Line *line, Editor_Span *s
 	
 	// Create a backup of what comes after the cursor
 	i64 after_in_span = span->len - at_in_span;
-	String temp = push_string(scratch.arena, after_in_span);
-	memcpy(temp.data, span->data + at_in_span, after_in_span);
+	String temp = string_clone(scratch.arena, string(span->data + after_in_span, after_in_span));
 	
 	// Pretend the span has more space (truncate at the cursor)
 	span->len = at_in_span;
@@ -212,6 +89,7 @@ editor_span_insert_text(Editor_Buffer *buffer, Editor_Line *line, Editor_Span *s
 	editor_span_append_text(buffer, line, new_span, temp);
 	
 	scratch_end(scratch);
+	return;
 }
 
 static void
@@ -236,6 +114,8 @@ editor_buffer_insert_text_at_cursor(Editor_Buffer *buffer, String text) {
 	
 	return;
 }
+
+//- Editor query functions
 
 static i64
 editor_line_len(Editor_Line *line) {
@@ -576,10 +456,7 @@ editor_init_buffer_contents(Editor_Buffer *buffer, SliceU8 contents) {
 	Editor_Page *page = NULL;
 	{
 		page = push_type(&buffer->arena, Editor_Page);
-		page->line_count = 0;
 		page->lines = push_array(&buffer->arena, Editor_Line, EDITOR_PAGE_SIZE);
-		page->next  = NULL;
-		page->prev  = NULL;
 		dll_push_back(buffer->first_page, buffer->last_page, page);
 		buffer->page_count += 1;
 	}
@@ -595,10 +472,7 @@ editor_init_buffer_contents(Editor_Buffer *buffer, SliceU8 contents) {
 			{
 				if (page->line_count >= EDITOR_PAGE_SIZE) {
 					page = push_type(&buffer->arena, Editor_Page);
-					page->line_count = 0;
 					page->lines = push_array(&buffer->arena, Editor_Line, EDITOR_PAGE_SIZE);
-					page->next  = NULL;
-					page->prev  = NULL;
 					dll_push_back(buffer->first_page, buffer->last_page, page);
 					buffer->page_count += 1;
 				}
@@ -616,20 +490,19 @@ editor_init_buffer_contents(Editor_Buffer *buffer, SliceU8 contents) {
 			i64 copied = 0;
 			
 			while (copied < line_len || !line->first_span) {
-				// Push new span
-				Editor_Span *span = push_type(&buffer->arena, Editor_Span);
-				span->data = push_array(&buffer->arena, u8, EDITOR_SPAN_SIZE);
-				
-				// Insert span
+				// Always allocate from arena here, since the free-list has been cleared
+				// at the top of this function
+				Editor_Span *span = editor_push_span(&buffer->arena);
 				dll_push_back(line->first_span, line->last_span, span);
 				
-				// Fill span
+				// No need to subtract the length (we just allocated it so it will be 0)
+				i64 space   = EDITOR_SPAN_SIZE;
 				i64 to_copy = line_len - copied;
-				i64 to_copy_now = min(to_copy, EDITOR_SPAN_SIZE);
+				i64 to_copy_now = min(space, to_copy);
 				memcpy(span->data, contents.data + line_start + copied, to_copy_now);
 				span->len = to_copy_now;
 				
-				copied += to_copy_now;
+				copied   += to_copy_now;
 			}
 			
 			assert(editor_line_len(line) == line_len);
@@ -642,9 +515,11 @@ editor_init_buffer_contents(Editor_Buffer *buffer, SliceU8 contents) {
 	return;
 }
 
-static void
+static bool
 editor_load_file(String file_name) {
 	// Overwrite previously loaded file.
+	
+	bool ok = false;
 	
 	if (!state.single_buffer) {
 		state.single_buffer = push_type(&state.arena, Editor_Buffer);
@@ -665,16 +540,14 @@ editor_load_file(String file_name) {
 		
 		state.single_buffer->file_name = string_clone(&state.single_buffer->arena, file_name);
 		state.single_buffer->name      = state.single_buffer->file_name;
-	} else {
-		// TODO: Something
 		
-		// If the file doesn't exist, simply leave the editor open with no loaded files
-		// Display a log message at the bottom or something
-		// For now just panic
-		panic("Could not read file");
+		ok = true;
+	} else {
+		;
 	}
 	
 	scratch_end(scratch);
+	return ok;
 }
 
 //- Editor cursor/view functions
@@ -798,11 +671,7 @@ editor_set_status_message(String message) {
 	state.status_message_timestamp = time(NULL);
 }
 
-#if OS_WINDOWS
-# include "fedit_windows.c"
-#elif OS_LINUX
-# include "fedit_linux.c"
-#endif
+//- Entry point
 
 int main(int argc, char **argv) {
 	
@@ -847,21 +716,29 @@ int main(int argc, char **argv) {
 		}
 		
 		state.current_buffer = state.null_buffer;
+		
+		editor_set_status_message(string_from_lit("Ctrl-Q to quit"));
 	}
 	
 	{
 		// Parse command-line args
 		if (argc > 1) {
 			String file_name = string_from_cstring(argv[1]);
-			editor_load_file(file_name);
+			bool loaded = editor_load_file(file_name);
 			
-			state.current_buffer = state.single_buffer;
+			if (loaded) {
+				state.current_buffer = state.single_buffer;
+			} else {
+				// If the file doesn't exist, simply leave the editor open with no loaded files
+				// Display a log message at the bottom or something
+				editor_set_status_message(string_from_lit("Failed to load file"));
+				
+				state.current_buffer = state.null_buffer;
+			}
 		}
 	}
 	
 	assert(state.current_buffer); // Always!
-	
-	editor_set_status_message(string_from_lit("Ctrl-Q to quit"));
 	
 	while (true) {
 		assert(state.current_buffer); // Always!
@@ -1034,7 +911,6 @@ int main(int argc, char **argv) {
 			} break;
 			
 			default: {
-				
 				Editor_Buffer *buffer = state.current_buffer;
 				if ((isprint(key) || key == '\t') && !buffer->is_read_only) {
 					u8 c = cast(u8) key;
