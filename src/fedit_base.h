@@ -298,6 +298,8 @@ static SliceU8 sliceu8_clone(Arena *arena, SliceU8 s);
 
 static String string(u8 *data, i64 len);
 static String push_string(Arena *arena, i64 len);
+static String push_stringf(Arena *arena, char *fmt, ...);
+static String push_stringf_va_list(Arena *arena, char *fmt, va_list args);
 static String string_from_sliceu8(SliceU8 s);
 static String string_clone(Arena *arena, String s);
 static String string_clone_buffer(u8 *buffer, i64 buffer_len, String s);

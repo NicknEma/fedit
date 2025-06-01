@@ -304,6 +304,26 @@ push_string(Arena *arena, i64 len) {
 }
 
 static String
+push_stringf(Arena *arena, char *fmt, ...) {
+	va_list args;
+	va_start(args, fmt);
+	String result = push_stringf_va_list(arena, fmt, args);
+	va_end(args);
+	return result;
+}
+
+static String
+push_stringf_va_list(Arena *arena, char *fmt, va_list args) {
+	i64 len = vsnprintf(0, 0, fmt, args);
+	String result = {
+		.data = push_nozero(arena, sizeof(u8) * len),
+		.len  = len,
+	};
+	vsnprintf(cast(char *) result.data, result.len, fmt, args);
+	return result;
+}
+
+static String
 string_from_sliceu8(SliceU8 s) {
 	return string(s.data, s.len);
 }
