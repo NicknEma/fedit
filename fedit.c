@@ -1036,7 +1036,7 @@ int main(int argc, char **argv) {
 			default: {
 				
 				Editor_Buffer *buffer = state.current_buffer;
-				if (isprint(key) && !buffer->is_read_only) {
+				if ((isprint(key) || key == '\t') && !buffer->is_read_only) {
 					u8 c = cast(u8) key;
 					String text = string(&c, 1);
 					
