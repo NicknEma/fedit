@@ -185,7 +185,7 @@ clear(void) {
 	write_console_unbuffered(get_clear_string());
 }
 
-static Editor_Key
+static ED_Key
 wait_for_key(void) {
 	char c = 0;
 	while (true) {
@@ -199,7 +199,7 @@ wait_for_key(void) {
 		}
 	}
 	
-	Editor_Key key = c;
+	ED_Key key = c;
 	if (key == '\x1b') {
 		// If we read the escape character (\x1b), there's a possibility that
 		// it was the first byte in an escape sequence, so try to read
@@ -216,30 +216,30 @@ wait_for_key(void) {
 					if (read(STDIN_FILENO, &seq[2], 1) == 1) {
 						if (seq[2] == '~') {
 							switch (seq[1]) {
-								case '1': key = Editor_Key_HOME; break;
-								case '3': key = Editor_Key_DELETE; break;
-								case '4': key = Editor_Key_END; break;
-								case '5': key = Editor_Key_PAGE_UP; break;
-								case '6': key = Editor_Key_PAGE_DOWN; break;
-								case '7': key = Editor_Key_HOME; break;
-								case '8': key = Editor_Key_END; break;
+								case '1': key = ED_Key_HOME; break;
+								case '3': key = ED_Key_DELETE; break;
+								case '4': key = ED_Key_END; break;
+								case '5': key = ED_Key_PAGE_UP; break;
+								case '6': key = ED_Key_PAGE_DOWN; break;
+								case '7': key = ED_Key_HOME; break;
+								case '8': key = ED_Key_END; break;
 							}
 						}
 					}
 				} else {
 					switch (seq[1]) {
-						case 'A': key = Editor_Key_ARROW_UP;    break;
-						case 'B': key = Editor_Key_ARROW_DOWN;  break;
-						case 'C': key = Editor_Key_ARROW_RIGHT; break;
-						case 'D': key = Editor_Key_ARROW_LEFT;  break;
-						case 'H': key = Editor_Key_HOME; break;
-						case 'F': key = Editor_Key_END; break;
+						case 'A': key = ED_Key_ARROW_UP;    break;
+						case 'B': key = ED_Key_ARROW_DOWN;  break;
+						case 'C': key = ED_Key_ARROW_RIGHT; break;
+						case 'D': key = ED_Key_ARROW_LEFT;  break;
+						case 'H': key = ED_Key_HOME; break;
+						case 'F': key = ED_Key_END; break;
 					}
 				}
 			} else if (seq[0] == '0') {
 				switch (seq[1]) {
-					case 'H': key = Editor_Key_HOME; break;
-					case 'F': key = Editor_Key_END; break;
+					case 'H': key = ED_Key_HOME; break;
+					case 'F': key = ED_Key_END; break;
 				}
 			}
 		}

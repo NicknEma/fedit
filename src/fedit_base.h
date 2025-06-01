@@ -26,6 +26,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <assert.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <ctype.h>
 #include <errno.h>
@@ -155,6 +156,19 @@ struct Point {
 	i32 x;
 	i32 y;
 };
+
+typedef struct Text_Range Text_Range;
+struct Text_Range {
+	Point start;
+	Point end;
+};
+
+enum Direction { Direction_HORIZONTAL, Direction_VERTICAL, };
+typedef enum Direction Direction;
+
+//- Basic types functions
+
+static Text_Range make_text_range(Point start, Point end);
 
 //- Integer math
 

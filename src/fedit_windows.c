@@ -178,7 +178,7 @@ clear(void) {
 	
 }
 
-static Editor_Key
+static ED_Key
 wait_for_key(void) {
 	
 	// With the help of:
@@ -227,18 +227,18 @@ wait_for_key(void) {
 	
 	assert(record.EventType == KEY_EVENT);
 	
-	Editor_Key key = 0;
+	ED_Key key = 0;
 	switch (record.Event.KeyEvent.wVirtualKeyCode) {
-		case VK_UP:     key = Editor_Key_ARROW_UP;    break;
-		case VK_DOWN:   key = Editor_Key_ARROW_DOWN;  break;
-		case VK_RIGHT:  key = Editor_Key_ARROW_RIGHT; break;
-		case VK_LEFT:   key = Editor_Key_ARROW_LEFT;  break;
-		case VK_PRIOR:  key = Editor_Key_PAGE_UP;     break;
-		case VK_NEXT:   key = Editor_Key_PAGE_DOWN;   break;
-		case VK_HOME:   key = Editor_Key_HOME;        break;
-		case VK_END:    key = Editor_Key_END;         break;
-		case VK_DELETE: key = Editor_Key_DELETE;      break;
-		case VK_BACK:   key = Editor_Key_BACKSPACE;   break;
+		case VK_UP:     key = ED_Key_ARROW_UP;    break;
+		case VK_DOWN:   key = ED_Key_ARROW_DOWN;  break;
+		case VK_RIGHT:  key = ED_Key_ARROW_RIGHT; break;
+		case VK_LEFT:   key = ED_Key_ARROW_LEFT;  break;
+		case VK_PRIOR:  key = ED_Key_PAGE_UP;     break;
+		case VK_NEXT:   key = ED_Key_PAGE_DOWN;   break;
+		case VK_HOME:   key = ED_Key_HOME;        break;
+		case VK_END:    key = ED_Key_END;         break;
+		case VK_DELETE: key = ED_Key_DELETE;      break;
+		case VK_BACK:   key = ED_Key_BACKSPACE;   break;
 		case VK_RETURN: key = '\n'; break;
 		case VK_ESCAPE: key = '\x1b'; break;
 		

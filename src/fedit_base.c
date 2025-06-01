@@ -34,6 +34,20 @@ fsize(FILE *fp) {
 	return fs;
 }
 
+////////////////////////////////
+//~ Core
+
+//- Basic types functions
+
+static Text_Range
+make_text_range(Point start, Point end) {
+	Text_Range result = {
+		.start = start,
+		.end   = end,
+	};
+	return result;
+}
+
 //- Integer math
 
 static bool
