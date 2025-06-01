@@ -38,6 +38,7 @@ typedef enum Editor_Key Editor_Key;
 typedef struct Editor_Span Editor_Span;
 struct Editor_Span {
 	Editor_Span *next;
+	Editor_Span *prev;
 	
 	u8  *data;
 	i64  len;
@@ -124,6 +125,7 @@ static String string_from_editor_line(Arena *arena, Editor_Line *line);
 static Editor_Relative_Line editor_relative_from_absolute_line(i64 absolute_line);
 static Editor_Line *editor_line_from_line_number(i64 line_number);
 static Editor_Line *editor_get_current_line();
+static Editor_Relative_Span editor_relative_span_from_line_and_pos(Editor_Line *line, i64 pos);
 
 static void editor_move_cursor(Editor_Key key);
 static void editor_update_scroll(void);
@@ -146,6 +148,94 @@ static bool query_cursor_position(Point *position);
 static Editor_Key wait_for_key(void);
 
 //- Editor helper functions
+
+static Editor_Span *
+editor_alloc_span(Editor_Buffer *buffer) {
+	Editor_Span *span = NULL;
+	if (buffer->first_free_span) {
+		// Get from free-list
+		span = stack_pop(buffer->first_free_span);
+		u8   *data = span->data;
+		memset(data, 0, EDITOR_SPAN_SIZE);
+		memset(span, 0, sizeof(Editor_Span));
+		span->data = data;
+	} else {
+		// Push new span
+		span = push_type(&buffer->arena, Editor_Span);
+		span->data = push_array(&buffer->arena, u8, EDITOR_SPAN_SIZE);
+	}
+	return span;
+}
+
+static Editor_Span *
+editor_span_append_text(Editor_Buffer *buffer, Editor_Line *line, Editor_Span *span, String text) {
+	i64 appended = 0;
+	
+	while (appended < text.len) {
+		if (span->len == EDITOR_SPAN_SIZE) {
+			// Alloc new span, to be placed after this one
+			Editor_Span *new_span = editor_alloc_span(buffer);
+			
+			// Insert it after the current one (dll_insert)
+			dll_insert(line->first_span, line->last_span, span, new_span);
+			
+			span = new_span;
+		}
+		
+		i64 space = EDITOR_SPAN_SIZE - span->len;
+		i64 to_copy = text.len - appended;
+		i64 to_copy_now = min(space, to_copy);
+		memcpy(span->data + span->len, text.data + appended, to_copy_now);
+		span->len += to_copy_now;
+		appended += to_copy_now;
+	}
+	
+	return span;
+}
+
+static void
+editor_span_insert_text(Editor_Buffer *buffer, Editor_Line *line, Editor_Span *span, i64 at_in_span, String text) {
+	Scratch scratch = scratch_begin(0, 0);
+	
+	// Create a backup of what comes after the cursor
+	i64 after_in_span = span->len - at_in_span;
+	String temp = push_string(scratch.arena, after_in_span);
+	memcpy(temp.data, span->data + at_in_span, after_in_span);
+	
+	// Pretend the span has more space (truncate at the cursor)
+	span->len = at_in_span;
+	
+	// Append the text, potentially creating new spans
+	Editor_Span *new_span = editor_span_append_text(buffer, line, span, text);
+	
+	// Copy the backup back into the line
+	editor_span_append_text(buffer, line, new_span, temp);
+	
+	scratch_end(scratch);
+}
+
+static void
+editor_buffer_insert_text_at_cursor(Editor_Buffer *buffer, String text) {
+	// TODO: Consider newlines
+	
+	// Get all the variables
+	Editor_Line *current_line = editor_get_current_line();
+	Editor_Span *current_span = NULL;
+	i64 at_in_span = 0;
+	
+	{
+		Editor_Relative_Span rel = editor_relative_span_from_line_and_pos(current_line, buffer->cursor_position.x);
+		current_span = rel.span;
+		at_in_span   = rel.at;
+	}
+	
+	Editor_Span *original_span = current_span; // For debugging only
+	(void)original_span;
+	
+	editor_span_insert_text(buffer, current_line, current_span, at_in_span, text);
+	
+	return;
+}
 
 static i64
 editor_line_len(Editor_Line *line) {
@@ -531,7 +621,7 @@ editor_init_buffer_contents(Editor_Buffer *buffer, SliceU8 contents) {
 				span->data = push_array(&buffer->arena, u8, EDITOR_SPAN_SIZE);
 				
 				// Insert span
-				queue_push(line->first_span, line->last_span, span);
+				dll_push_back(line->first_span, line->last_span, span);
 				
 				// Fill span
 				i64 to_copy = line_len - copied;
@@ -849,9 +939,9 @@ int main(int argc, char **argv) {
 					i64 at_in_span = 0;
 					
 					{
-						Editor_Relative_Span rels = editor_relative_span_from_line_and_pos(current_line, buffer->cursor_position.x);
-						current_span = rels.span;
-						at_in_span   = rels.at;
+						Editor_Relative_Span rel = editor_relative_span_from_line_and_pos(current_line, buffer->cursor_position.x);
+						current_span = rel.span;
+						at_in_span   = rel.at;
 					}
 					
 					bool insert_before = false;
@@ -944,21 +1034,20 @@ int main(int argc, char **argv) {
 			} break;
 			
 			default: {
-				if (isprint(key) && !state.current_buffer->is_read_only) {
-#if 0
-					char c = cast(char) key;
+				
+				Editor_Buffer *buffer = state.current_buffer;
+				if (isprint(key) && !buffer->is_read_only) {
+					u8 c = cast(u8) key;
+					String text = string(&c, 1);
 					
-					Editor_Line *current_line = editor_get_current_line();
-					if (current_line->len < current_line->cap) {
-						i64 at = state.current_buffer->cursor_position.x;
-						i64 after = current_line->len - at;
-						memmove(current_line->data + at, current_line->data + at + 1, after);
-						(current_line->data + at)[0] = c;
-						current_line->len += 1;
+					editor_buffer_insert_text_at_cursor(buffer, text);
+					
+					// Reposition cursor
+					for (i64 i = 0; i < text.len; i += 1) {
+						editor_move_cursor(Editor_Key_ARROW_RIGHT);
 					}
 					
 					allow_break();
-#endif
 				}
 			} break;
 		}
