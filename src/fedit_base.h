@@ -305,6 +305,9 @@ static String string_from_sliceu8(SliceU8 s);
 static String string_clone(Arena *arena, String s);
 static String string_clone_buffer(u8 *buffer, i64 buffer_len, String s);
 static char *cstring_from_string(Arena *arena, String s);
+static bool string_starts_with(String a, String b);
+static i64 string_find_first(String s, u8 c);
+static String string_skip(String s, i64 amount);
 
 ////////////////////////////////
 //~ String Builder

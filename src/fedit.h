@@ -14,6 +14,8 @@
 
 //- Editor constants
 
+#define FEDIT_VERSION "1"
+
 #define CTRL_KEY(k) ((k) & 0x1f)
 
 #define ESCAPE_BYTE   '\x1b'
@@ -148,20 +150,42 @@ struct ED_Relative_Span {
 	i64 at;
 };
 
+typedef struct ED_Page_Line ED_Page_Line;
+struct ED_Page_Line {
+	ED_Page *page;
+	ED_Line *line;
+};
+
+typedef struct ED_Page_Line_Span_Point ED_Page_Line_Span_Point;
+struct ED_Page_Line_Span_Point {
+	ED_Page *page;
+	ED_Line *line;
+	ED_Span *span;
+	Point point;
+};
+
 //- Editor span functions
 
 static ED_Span *ed_push_span(Arena *arena);
 static ED_Span *ed_alloc_span(ED_Buffer *buffer);
 
 // In the following functions, the buffer is needed for allocations
-static ED_Span *ed_span_append_text(ED_Buffer *buffer, ED_Line *line, ED_Span *span, String text);
-static void     ed_span_insert_text(ED_Buffer *buffer, ED_Line *line, ED_Span *span,
+static ED_Page_Line_Span_Point ed_span_append_text(ED_Buffer *buffer, ED_Page *page, ED_Line *line, ED_Span *span, String text);
+static Point    ed_span_insert_text(ED_Buffer *buffer, ED_Page *page, ED_Line *line, ED_Span *span,
 									i64 at_in_span, String text);
+
+static Point    ed_span_insert_text_at_point(ED_Buffer *buffer, Point point, String text);
+
+//- Editor page functions
+
+static ED_Page *ed_push_page(Arena *arena);
+static ED_Page *ed_alloc_page(ED_Buffer *buffer);
 
 //- Editor line functions
 
 static i64 ed_line_len(ED_Line *line);
 static String string_from_ed_line(Arena *arena, ED_Line *line);
+static ED_Page_Line ed_get_next_line(ED_Buffer *buffer, ED_Page *page, ED_Line *line);
 static ED_Relative_Line ed_relative_from_absolute_line(i64 absolute_line);
 static ED_Line *ed_line_from_line_number(i64 line_number);
 static ED_Line *ed_get_current_line();
@@ -182,6 +206,9 @@ static bool ed_buffer_is_in_use(ED_Buffer *buffer);
 static void ed_move_cursor(ED_Key key);
 static void ed_buffer_apply_operation(ED_Buffer *buffer, ED_Text_Operation op);
 static void ed_buffer_remove_range(ED_Buffer *buffer, Text_Range range);
+
+static Point ed_buffer_split_at_point(ED_Buffer *buffer, Point point);
+static void  ed_buffer_split_at_cursor(ED_Buffer *buffer);
 
 //- Editor load/save functions
 

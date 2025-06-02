@@ -16,6 +16,35 @@
 
 // TODO: Review all casts
 
+//- Editor page functions
+
+static ED_Page *
+ed_push_page(Arena *arena) {
+	ED_Page *page;
+	
+	page = push_type(arena, ED_Page);
+	page->lines = push_array(arena, ED_Line, ED_PAGE_SIZE);
+	
+	return page;
+}
+
+static ED_Page *
+ed_alloc_page(ED_Buffer *buffer) {
+	ED_Page *page = NULL;
+	
+	if (buffer->first_free_page) {
+		page = stack_pop(buffer->first_free_page);
+		ED_Line *lines = page->lines;
+		memset(lines, 0, ED_PAGE_SIZE);
+		memset(page, 0, sizeof(ED_Page));
+		page->lines = lines;
+	} else {
+		page = ed_push_page(&buffer->arena);
+	}
+	
+	return page;
+}
+
 //- Editor span functions
 
 static ED_Span *
@@ -45,35 +74,101 @@ ed_alloc_span(ED_Buffer *buffer) {
 	return span;
 }
 
-static ED_Span *
-ed_span_append_text(ED_Buffer *buffer, ED_Line *line, ED_Span *span, String text) {
+static ED_Page_Line_Span_Point
+ed_span_append_text(ED_Buffer *buffer, ED_Page *page, ED_Line *line, ED_Span *span, String text) {
 	i64 appended = 0;
 	
-	while (appended < text.len) {
-		if (span->len == ED_SPAN_SIZE) {
+	i64 newline_count = 0;
+	i64 len_after_last_newline = text.len;
+	
+	while (text.len > 0) {
+		bool has_newline = true;
+		i64 split_index = string_find_first(text, '\n');
+		if (split_index < 0) {
+			split_index = text.len;
+			has_newline = false;
+		}
+		
+		String chunk = string_stop(text, split_index);
+		text = string_skip(text, split_index + 1);
+		
+		while (appended < chunk.len) {
+			if (span->len == ED_SPAN_SIZE) {
+				ED_Span *new_span = ed_alloc_span(buffer);
+				dll_insert(line->first_span, line->last_span, span, new_span);
+				
+				span = new_span;
+			}
+			
+			i64 space   = ED_SPAN_SIZE - span->len;
+			i64 to_copy = chunk.len - appended;
+			i64 to_copy_now = min(space, to_copy);
+			memcpy(span->data + span->len, chunk.data + appended, to_copy_now);
+			span->len += to_copy_now;
+			
+			appended  += to_copy_now;
+		}
+		
+		if (has_newline) {
+			newline_count += 1;
+			len_after_last_newline = text.len;
+			
+			// TODO: There must be a more elegant way of writing this
+			// Get the next line - if it doesn't exist, make a new one
+			
+			// TODO: WRONG! Always create a new line, that's the whole point!
+			// Make better primitives, like insert_new_line_after()
+			if (line + 1 < page->lines + page->line_count) {
+				line = line + 1;
+			} else if (line + 1 < page->lines + ED_PAGE_SIZE) {
+				assert(page->line_count < ED_PAGE_SIZE);
+				line = line + 1;
+				page->line_count += 1;
+				buffer->line_count += 1;
+			} else {
+				if (!page->next) {
+					ED_Page *new_page = ed_alloc_page(buffer);
+					dll_insert(buffer->first_page, buffer->last_page, page, new_page);
+					
+					page = page->next;
+				}
+				
+				line = &page->lines[0];
+				page->line_count += 1;
+				buffer->line_count += 1;
+			}
+			
 			ED_Span *new_span = ed_alloc_span(buffer);
 			dll_insert(line->first_span, line->last_span, span, new_span);
 			
 			span = new_span;
 		}
-		
-		i64 space   = ED_SPAN_SIZE - span->len;
-		i64 to_copy = text.len - appended;
-		i64 to_copy_now = min(space, to_copy);
-		memcpy(span->data + span->len, text.data + appended, to_copy_now);
-		span->len += to_copy_now;
-		
-		appended  += to_copy_now;
 	}
 	
-	return span;
+	ED_Page_Line_Span_Point result = { page, line, span, { cast(i32) len_after_last_newline, cast(i32) newline_count } };
+	return result;
 }
 
-static void
-ed_span_insert_text(ED_Buffer *buffer, ED_Line *line, ED_Span *span, i64 at_in_span, String text) {
-	Scratch scratch = scratch_begin(0, 0);
+static ED_Page_Line
+ed_get_next_line(ED_Buffer *buffer, ED_Page *page, ED_Line *line) {
+	ED_Page_Line result = {0};
 	
-	// TODO: Consider newlines
+	(void)buffer;
+	
+	if (line + 1 < page->lines + page->line_count) {
+		result.page = page;
+		result.line = line + 1;
+	} else {
+		result.page = page->next;
+		result.line = &page->next->lines[0];
+	}
+	
+	return result;
+}
+
+static Point
+ed_span_insert_text(ED_Buffer *buffer, ED_Page *page, ED_Line *line, ED_Span *span, i64 at_in_span, String text) {
+	Scratch scratch = scratch_begin(0, 0);
 	
 	// Create a backup of what comes after the cursor
 	i64 after_in_span = span->len - at_in_span;
@@ -83,16 +178,41 @@ ed_span_insert_text(ED_Buffer *buffer, ED_Line *line, ED_Span *span, i64 at_in_s
 	span->len = at_in_span;
 	
 	// Append the text, potentially creating new spans
-	ED_Span *new_span = ed_span_append_text(buffer, line, span, text);
+	ED_Page_Line_Span_Point new_ptrs = ed_span_append_text(buffer, page, line, span, text);
 	
 	// Copy the backup back into the line
-	ed_span_append_text(buffer, line, new_span, temp);
-	
-	// Expand newlines
-	// ed_buffer_expand_newlines(buffer, );
+	ed_span_append_text(buffer, new_ptrs.page, new_ptrs.line, new_ptrs.span, temp);
 	
 	scratch_end(scratch);
-	return;
+	return new_ptrs.point;
+}
+
+static Point
+ed_span_insert_text_at_point(ED_Buffer *buffer, Point point, String text) {
+	
+	// Get all the variables
+	ED_Page *page = NULL;
+	ED_Line *line = NULL;
+	ED_Span *span = NULL;
+	i64 line_in_page = 0;
+	i64 at_in_span = 0;
+	
+	{
+		ED_Relative_Line rel = ed_relative_from_absolute_line(point.y);
+		page = rel.page;
+		line = &rel.page->lines[rel.line];
+		line_in_page = rel.line;
+	}
+	
+	{
+		ED_Relative_Span rel = ed_relative_span_from_line_and_pos(line, point.x);
+		span = rel.span;
+		at_in_span = rel.at;
+	}
+	
+	// Insert text
+	Point result = ed_span_insert_text(buffer, page, line, span, at_in_span, text);
+	return result;
 }
 
 //- Editor line functions
@@ -185,6 +305,9 @@ ed_get_current_line() {
 static void
 ed_buffer_insert_text_at_cursor(ED_Buffer *buffer, String text) {
 	
+	ed_span_insert_text_at_point(buffer, buffer->cursor, text);
+	
+#if 0
 	// Get all the variables
 	ED_Line *current_line = ed_get_current_line();
 	ED_Span *current_span = NULL;
@@ -201,70 +324,59 @@ ed_buffer_insert_text_at_cursor(ED_Buffer *buffer, String text) {
 	
 	ed_span_insert_text(buffer, current_line, current_span, at_in_span, text);
 	
-	buffer->cursor.x += cast(i32) text.len; // TODO: Assumes no newlines
+	// buffer->cursor.x += cast(i32) text.len; // TODO: Assumes no newlines
+	
+	
+	{
+		Scratch scratch = scratch_begin(0, 0);
+		
+		Point point = {buffer->cursor.x, buffer->cursor.y};
+		
+		i64 len_after_last_newline = 0;
+		
+		// TODO: @Cleanup
+		
+		bool done = false;
+		while (!done) {
+			ED_Line *line = ed_line_from_line_number(point.y);
+			String text_ = string_from_ed_line(scratch.arena, line);
+			if (text_.len == 0) {
+				done = true;
+			}
+			
+			bool has_newlines = false;
+			for (int i = 0; i < text_.len; i += 1) {
+				if (text_.data[i] == '\n') {
+					point.x = i;
+					point   = ed_buffer_split_at_point(buffer, point);
+					
+					{
+						ED_Line *line_ = ed_line_from_line_number(point.y);
+						assert(line_->first_span->data[0] == '\n');
+						memmove(line_->first_span->data, line_->first_span->data + 1, line_->first_span->len - 1);
+						line_->first_span->len -= 1;
+					}
+					
+					len_after_last_newline = text_.len - i - 1; // -1 for the actual newline
+					has_newlines = true;
+					break;
+				}
+			}
+			
+			if (!has_newlines) break;
+			
+			// TODO: The string can be freed after every iteration, if you want to save memory...
+		}
+		
+		point.x = cast(i32) len_after_last_newline;
+		buffer->cursor = point;
+		
+		scratch_end(scratch);
+	}
+#endif
 	
 	return;
 }
-
-#if 0
-static void
-ed_move_cursor(ED_Key key) {
-	ED_Buffer *buffer = state.current_buffer;
-	
-	(void)buffer;
-	(void)key;
-	switch (key) {
-		case ED_Key_ARROW_LEFT: {
-			if (buffer->cursor.x > 0) {
-				buffer->cursor.x -= 1;
-			} else {
-				// Move to end of previous line
-				if (buffer->cursor.y > 0) {
-					buffer->cursor.y -= 1;
-					ED_Line *line = ed_line_from_line_number(buffer->cursor.y);
-					buffer->cursor.x = cast(i32) ed_line_len(line);
-				}
-			}
-		} break;
-		
-		case ED_Key_ARROW_RIGHT: {
-			ED_Line *line = ed_line_from_line_number(buffer->cursor.y);
-			if (buffer->cursor.x < ed_line_len(line)) {
-				buffer->cursor.x += 1;
-			} else {
-				// Move to start of next line
-				if (buffer->cursor.y < buffer->line_count - 1) {
-					buffer->cursor.y += 1;
-					buffer->cursor.x = 0;
-				}
-			}
-		} break;
-		
-		case ED_Key_ARROW_UP: {
-			if (buffer->cursor.y > 0) {
-				buffer->cursor.y -= 1;
-			}
-		} break;
-		
-		case ED_Key_ARROW_DOWN: {
-			if (buffer->cursor.y < buffer->line_count - 1) {
-				buffer->cursor.y += 1;
-			}
-		} break;
-		
-		default: {
-			panic("Invalid argument 'key'");
-		}
-	}
-	
-	ED_Line *line = ed_line_from_line_number(buffer->cursor.y);
-	i64 line_len = ed_line_len(line);
-	if (buffer->cursor.x > line_len) {
-		buffer->cursor.x = cast(i32) line_len;
-	}
-	
-}
-#endif
 
 static void
 ed_buffer_apply_operation(ED_Buffer *buffer, ED_Text_Operation operation) {
@@ -277,7 +389,18 @@ ed_buffer_apply_operation(ED_Buffer *buffer, ED_Text_Operation operation) {
 	ed_buffer_remove_range(buffer, operation.delete_range);
 	
 	// Paste replace_string
-	ed_buffer_insert_text_at_cursor(buffer, operation.replace_string);
+	Point point = ed_span_insert_text_at_point(buffer, buffer->cursor, operation.replace_string);
+	
+	if (point.y > 0) {
+		buffer->cursor.x = point.x;
+	} else {
+		buffer->cursor.x += point.x; // TODO: EXPLAIN THIS LOGIC
+	}
+	buffer->cursor.y += point.y;
+	
+	assert(ed_text_point_exists(buffer, buffer->cursor));
+	
+	return;
 }
 
 static void
@@ -499,6 +622,134 @@ ed_buffer_remove_range(ED_Buffer *buffer, Text_Range range) {
 	}
 	
 	return;
+}
+
+#if 0
+static void
+ed_buffer_split_line_at_pos(ED_Buffer *buffer, Line *line, i64 pos) {
+	
+}
+#endif
+
+static void
+ed_buffer_split_at_cursor(ED_Buffer *buffer) {
+	ed_buffer_split_at_point(buffer, buffer->cursor);
+}
+
+static Point
+ed_buffer_split_at_point(ED_Buffer *buffer, Point point) {
+	
+	// Get all the variables
+	ED_Page *current_page = NULL;
+	ED_Line *current_line = NULL;
+	i64 line_in_page = 0;
+	
+	{
+		ED_Relative_Line rel = ed_relative_from_absolute_line(point.y);
+		current_page = rel.page;
+		current_line = &current_page->lines[rel.line];
+		line_in_page = rel.line;
+	}
+	
+	ED_Span *current_span = NULL;
+	i64 at_in_span = 0;
+	
+	{
+		ED_Relative_Span rel = ed_relative_span_from_line_and_pos(current_line, point.x);
+		current_span = rel.span;
+		at_in_span   = rel.at;
+	}
+	
+	bool insert_before = false;
+	if (current_page->line_count == ED_PAGE_SIZE) {
+		// Allocate new page, to be placed after this one
+		ED_Page *new_page = NULL;
+		if (buffer->first_free_page) {
+			// Get from free-list
+			new_page = stack_pop(buffer->first_free_page);
+			new_page->next = NULL;
+			new_page->prev = NULL;
+			new_page->line_count = 0;
+		} else {
+			// Push new page
+			new_page = push_type(&buffer->arena, ED_Page);
+			new_page->lines = push_array(&buffer->arena, ED_Line, ED_PAGE_SIZE);
+		}
+		
+		// Insert page
+		dll_insert(buffer->first_page, buffer->last_page, current_page, new_page);
+		
+		// Copy last line into new page
+		new_page->lines[0] = current_page->lines[ED_PAGE_SIZE - 1];
+		new_page->line_count += 1;
+		
+		current_page->line_count -= 1;
+	} else {
+		assert(line_in_page <= ED_PAGE_SIZE);
+	}
+	
+	// Shift all the lines of this page
+	i64 lines_after_cursor = ED_PAGE_SIZE - line_in_page - 1;
+	memmove(current_page->lines + line_in_page + 1, current_page->lines + line_in_page, lines_after_cursor * sizeof(ED_Line));
+	
+	ED_Page *original_page = current_page; // For debugging only
+	(void)original_page;
+	
+	// Fix for when the cursor is exactly on the last line of a page:
+	// Undo some of the changes and pretend that the new page is the current page
+	//
+	// Feels like a @Hack but it works... ? I don't really like how I added
+	// 'insert_before' but it seems like the only way.
+	if (line_in_page == ED_PAGE_SIZE - 1) {
+		current_page->line_count += 1;
+		current_page = current_page->next;
+		current_page->line_count -= 1;
+		memset(&current_page->lines[0], 0, sizeof(ED_Line));
+		line_in_page = 0;
+		insert_before = true;
+	}
+	
+	// Alloc new span
+	ED_Span *new_span = NULL;
+	{
+		if (buffer->first_free_span) {
+			// Get from free-list
+			new_span = stack_pop(buffer->first_free_span);
+			memset(new_span->data, 0, ED_SPAN_SIZE);
+			new_span->next = NULL;
+			new_span->len  = 0;
+		} else {
+			// Push new span
+			new_span = push_type(&buffer->arena, ED_Span);
+			new_span->data = push_array(&buffer->arena, u8, ED_SPAN_SIZE);
+		}
+	}
+	
+	// Copy chars after cursor to new span and truncate the current span
+	i64 chars_after_cursor = current_span->len - at_in_span;
+	memcpy(new_span->data, current_span->data + at_in_span, chars_after_cursor);
+	new_span->len = chars_after_cursor;
+	
+	// Truncate current line
+	current_span->next = NULL;
+	current_span->len  = at_in_span;
+	
+	// Insert new span into the current page
+	if (insert_before) {
+		current_page->lines[line_in_page+0].first_span = new_span;
+	} else {
+		current_page->lines[line_in_page+1].first_span = new_span;
+	}
+	current_page->line_count += 1;
+	buffer->line_count += 1;
+	
+	// Reposition cursor
+	
+	point.x = 0;
+	point.y = min(cast(i32) (buffer->line_count - 1), point.y + 1);
+	// ed_move_cursor(ED_Key_ARROW_DOWN);
+	// state.current_buffer->cursor.x = 0; // Copy the behaviour of the HOME key
+	return point;
 }
 
 //- Editor input processing
@@ -959,7 +1210,6 @@ ed_render_buffer(ED_Buffer *buffer) {
 			} else {
 				if (buffer == state.null_buffer && y == state.window_size.height / 3) {
 					
-#define FEDIT_VERSION "1"
 					char welcome[80];
 					int  welcomelen = snprintf(welcome, sizeof(welcome), "Fedit -- version %s", FEDIT_VERSION);
 					int to_write = min(welcomelen, state.window_size.width);
@@ -1282,113 +1532,6 @@ int main(int argc, char **argv) {
 				ED_Buffer *buffer = state.current_buffer;
 				if (!buffer->is_read_only) {
 					
-					// Get all the variables
-					ED_Page *current_page = NULL;
-					ED_Line *current_line = NULL;
-					i64 line_in_page = 0;
-					
-					{
-						ED_Relative_Line rel = ed_relative_from_absolute_line(buffer->cursor.y);
-						current_page = rel.page;
-						current_line = &current_page->lines[rel.line];
-						line_in_page = rel.line;
-					}
-					
-					ED_Span *current_span = NULL;
-					i64 at_in_span = 0;
-					
-					{
-						ED_Relative_Span rel = ed_relative_span_from_line_and_pos(current_line, buffer->cursor.x);
-						current_span = rel.span;
-						at_in_span   = rel.at;
-					}
-					
-					bool insert_before = false;
-					if (current_page->line_count == ED_PAGE_SIZE) {
-						// Allocate new page, to be placed after this one
-						ED_Page *new_page = NULL;
-						if (buffer->first_free_page) {
-							// Get from free-list
-							new_page = stack_pop(buffer->first_free_page);
-							new_page->next = NULL;
-							new_page->prev = NULL;
-							new_page->line_count = 0;
-						} else {
-							// Push new page
-							new_page = push_type(&buffer->arena, ED_Page);
-							new_page->lines = push_array(&buffer->arena, ED_Line, ED_PAGE_SIZE);
-						}
-						
-						// Insert page
-						dll_insert(buffer->first_page, buffer->last_page, current_page, new_page);
-						
-						// Copy last line into new page
-						new_page->lines[0] = current_page->lines[ED_PAGE_SIZE - 1];
-						new_page->line_count += 1;
-						
-						current_page->line_count -= 1;
-					} else {
-						assert(line_in_page <= ED_PAGE_SIZE);
-					}
-					
-					// Shift all the lines of this page
-					i64 lines_after_cursor = ED_PAGE_SIZE - line_in_page - 1;
-					memmove(current_page->lines + line_in_page + 1, current_page->lines + line_in_page, lines_after_cursor * sizeof(ED_Line));
-					
-					ED_Page *original_page = current_page; // For debugging only
-					(void)original_page;
-					
-					// Fix for when the cursor is exactly on the last line of a page:
-					// Undo some of the changes and pretend that the new page is the current page
-					//
-					// Feels like a @Hack but it works... ? I don't really like how I added
-					// 'insert_before' but it seems like the only way.
-					if (line_in_page == ED_PAGE_SIZE - 1) {
-						current_page->line_count += 1;
-						current_page = current_page->next;
-						current_page->line_count -= 1;
-						memset(&current_page->lines[0], 0, sizeof(ED_Line));
-						line_in_page = 0;
-						insert_before = true;
-					}
-					
-					// Alloc new span
-					ED_Span *new_span = NULL;
-					{
-						if (buffer->first_free_span) {
-							// Get from free-list
-							new_span = stack_pop(buffer->first_free_span);
-							memset(new_span->data, 0, ED_SPAN_SIZE);
-							new_span->next = NULL;
-							new_span->len  = 0;
-						} else {
-							// Push new span
-							new_span = push_type(&buffer->arena, ED_Span);
-							new_span->data = push_array(&buffer->arena, u8, ED_SPAN_SIZE);
-						}
-					}
-					
-					// Copy chars after cursor to new span and truncate the current span
-					i64 chars_after_cursor = current_span->len - at_in_span;
-					memcpy(new_span->data, current_span->data + at_in_span, chars_after_cursor);
-					new_span->len = chars_after_cursor;
-					
-					// Truncate current line
-					current_span->next = NULL;
-					current_span->len  = at_in_span;
-					
-					// Insert new span into the current page
-					if (insert_before) {
-						current_page->lines[line_in_page+0].first_span = new_span;
-					} else {
-						current_page->lines[line_in_page+1].first_span = new_span;
-					}
-					current_page->line_count += 1;
-					buffer->line_count += 1;
-					
-					// Reposition cursor
-					ed_move_cursor(ED_Key_ARROW_DOWN);
-					state.current_buffer->cursor.x = 0; // Copy the behaviour of the HOME key
 				}
 			} break;
 			

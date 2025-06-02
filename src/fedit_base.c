@@ -363,6 +363,60 @@ cstring_from_string(Arena *arena, String s) {
 	return result;
 }
 
+static bool
+string_starts_with(String a, String b) {
+	bool result = false;
+	if (a.len >= b.len) {
+		int memcmp_result = memcmp(a.data, b.data, b.len);
+		result = memcmp_result == 0;
+	}
+	return result;
+}
+
+static i64
+string_find_first(String s, u8 c) {
+	i64 result = -1;
+	for (i64 i = 0; i < s.len; i += 1) {
+		if (s.data[i] == c) {
+			result = i;
+			break;
+		}
+	}
+	return result;
+}
+
+static String
+string_skip(String s, i64 amount) {
+	if (amount > s.len) {
+		amount = s.len;
+	}
+	
+	s.data += amount;
+	s.len  -= amount;
+	
+	return s;
+}
+
+static String
+string_chop(String s, i64 amount) {
+	if (amount > s.len) {
+		amount = s.len;
+	}
+	
+	s.len -= amount;
+	
+	return s;
+}
+
+static String
+string_stop(String s, i64 index) {
+	if (index < s.len && index > -1) {
+		s.len = index;
+	}
+	
+	return s;
+}
+
 ////////////////////////////////
 //~ String Builder
 
