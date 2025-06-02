@@ -293,16 +293,19 @@ ed_buffer_remove_range(ED_Buffer *buffer, Text_Range range) {
 		start_line_in_page = rel.line;
 	}
 	
+	// Validate arguments
 	assert(range.end.y >= range.start.y && range.end.x >= range.start.x);
-	
-	// TODO: Verify that both points are valid in the buffer
+	assert(ed_text_point_exists(buffer, range.start));
+	assert(ed_text_point_exists(buffer, range.end));
 	
 	{
 		// Delete lines from start downwards
 		
-		i64 lines_remaining = ED_PAGE_SIZE - start_line_in_page - 1;
-		i64 line_diff = range.end.y - range.start.y - 1;
-		i64 lines_to_delete = min(line_diff, lines_remaining);
+		// i64 lines_remaining = ED_PAGE_SIZE - start_line_in_page - 1;
+		i64 lines_remaining = start_page->line_count - start_line_in_page - 1;
+		i64 line_diff = range.end.y - range.start.y;
+		i64 lines_to_delete = min(line_diff - 1, lines_remaining);
+		lines_to_delete = max(lines_to_delete, 0);
 		
 		for (i64 i = 0; i < lines_to_delete; i += 1) {
 			i64 line_index = i + start_line_in_page + 1;
@@ -342,8 +345,9 @@ ed_buffer_remove_range(ED_Buffer *buffer, Text_Range range) {
 		// Delete lines from end upwards
 		
 		i64 lines_remaining = end_line_in_page;
-		i64 line_diff = range.end.y - range.start.y - 1;
-		i64 lines_to_delete = min(line_diff, lines_remaining);
+		i64 line_diff = range.end.y - range.start.y;
+		i64 lines_to_delete = min(line_diff - 1, lines_remaining);
+		lines_to_delete = max(lines_to_delete, 0);
 		
 		for (i64 i = 0; i < lines_to_delete; i += 1) {
 			i64 line_index = i + end_line_in_page - lines_to_delete;
@@ -361,6 +365,10 @@ ed_buffer_remove_range(ED_Buffer *buffer, Text_Range range) {
 		memmove(end_page->lines, end_page->lines + lines_to_delete, sizeof(ED_Line) * lines_to_delete);
 		start_page->line_count -= lines_to_delete;
 		buffer->line_count -= lines_to_delete;
+		
+		
+		
+		range.end.y -= cast(i32) lines_to_delete;
 	}
 	
 	assert((start_line_in_page == start_page->line_count - 1 &&
@@ -369,6 +377,93 @@ ed_buffer_remove_range(ED_Buffer *buffer, Text_Range range) {
 	
 	{
 		// TODO: Join lines
+		
+		ED_Span *start_span = NULL;
+		i64 at_in_start_span = 0;
+		
+		{
+			ED_Relative_Span rel = ed_relative_span_from_line_and_pos(start_line, range.start.x);
+			start_span = rel.span;
+			at_in_start_span = rel.at;
+		}
+		
+		ED_Span *end_span = NULL;
+		i64 at_in_end_span = 0;
+		
+		{
+			ED_Relative_Span rel = ed_relative_span_from_line_and_pos(end_line, range.end.x);
+			end_span = rel.span;
+			at_in_end_span = rel.at;
+		}
+		
+		if (start_span == end_span) {
+			assert(at_in_start_span <= at_in_end_span);
+			
+			i64 to_copy = end_span->len - at_in_end_span;
+			// i64 to_copy = (range.end.x - range.start.x);
+			memmove(start_span->data + at_in_start_span, end_span->data + at_in_end_span, to_copy);
+			start_span->len -= (range.end.x - range.start.x);
+			
+			if (to_copy > 0) {
+				assert(start_span->len == at_in_start_span + to_copy);
+			}
+		} else {
+			
+			// Get variables that may have changed
+			{
+				ED_Relative_Line rel = ed_relative_from_absolute_line(range.end.y);
+				end_page = rel.page;
+				end_line = &end_page->lines[rel.line];
+				end_line_in_page = rel.line;
+			}
+			
+			// 1: Concatenate the 2 lines
+			if (range.start.y < range.end.y) {
+				assert(range.start.y == range.end.y - 1);
+				
+				
+				start_line->last_span->next = end_line->first_span;
+				end_line->first_span->prev = start_line->last_span;
+				
+				start_line->last_span = end_line->last_span;
+				end_line->first_span = start_line->first_span;
+				
+				
+#if 1
+				i64 lines_remaining = end_page->line_count - end_line_in_page; // TODO: no -1 here?
+				i64 lines_to_delete = 1;
+				memmove(end_page->lines + end_line_in_page, end_page->lines + end_line_in_page + 1,
+						(lines_remaining - lines_to_delete) * sizeof(ED_Line));
+				end_page->line_count -= lines_to_delete;
+				buffer->line_count -= lines_to_delete;
+#endif
+				
+			}
+			
+			// 2: Remove spans in between
+			while (start_span->next != end_span) {
+				ED_Span *span_to_free = start_span->next;
+				
+				dll_remove(start_line->first_span, start_line->last_span, span_to_free);
+				stack_push(buffer->first_free_span, span_to_free);
+			}
+			
+			// 3: Make sure spans are correct
+			
+			start_span->len = at_in_start_span;
+			
+			
+			
+			// TODO: I see similarities between here and the case in which they're the same span.
+			// Maybe they're the same case.
+			
+			i64 to_copy = end_span->len - at_in_end_span;
+			memmove(end_span->data + 0, end_span->data + at_in_end_span, to_copy);
+			end_span->len = to_copy;
+			
+			allow_break();
+		}
+		
 	}
 	
 	return;
@@ -456,8 +551,7 @@ ed_text_operation_from_action(Arena *arena, ED_Buffer *buffer, ED_Text_Action ac
 	
 	if (action.flags & ED_Text_Action_Flags_DELETE) {
 		// Mark whole region to be deleted
-		op.delete_range.start = buffer->cursor;
-		op.delete_range.end   = op.new_cursor;
+		op.delete_range = make_text_range(buffer->cursor, op.new_cursor);
 		
 		// Reset the cursor
 		op.new_cursor = op.delete_range.start;
@@ -493,21 +587,28 @@ ed_buffer_clamp_delta(ED_Buffer *buffer, Point point, ED_Delta delta) {
 				ED_Line *line = ed_line_from_line_number(result.y);
 				i64 len = ed_line_len(line);
 				
+				// @Cleanup: Is there a way to simplify this codepath? It should be simple...
 				if (result.x < 0) {
 					if (delta.cross_lines) {
 						// Move to end of previous line
-						result.y -= 1;
-						result.x = cast(i32) ed_line_len(line);
+						if (result.y > 0) {
+							result.y -= 1;
+							result.x = cast(i32) ed_line_len(ed_line_from_line_number(result.y)); // Get it again because it changed...
+						} else {
+							result.x = 0;
+						}
 					} else {
 						result.x = 0;
 					}
-				}
-				
-				if (result.x > len) {
+				} else if (result.x > len) {
 					if (delta.cross_lines) {
 						// Move to start of next line
-						result.y += 1;
-						result.x = 0;
+						if (result.y < buffer->line_count - 1) {
+							result.y += 1;
+							result.x = 0;
+						} else {
+							result.x = cast(i32) len;
+						}
 					} else {
 						result.x = cast(i32) len;
 					}
@@ -909,6 +1010,24 @@ ed_render_buffer(ED_Buffer *buffer) {
 
 //- Editor debug functions
 
+static bool
+ed_text_point_exists(ED_Buffer *buffer, Point point) {
+	bool exists = true;
+	
+	if (point.y < 0 || point.y > buffer->line_count) {
+		exists = false;
+	}
+	
+	if (exists) {
+		ED_Line *line = ed_line_from_line_number(point.y);
+		if (point.x < 0 || point.x > ed_line_len(line)) {
+			exists = false;
+		}
+	}
+	
+	return exists;
+}
+
 static void
 ed_validate_buffer(ED_Buffer *buffer) {
 	{
@@ -1026,17 +1145,19 @@ int main(int argc, char **argv) {
 	
 	if (argc > 1) {
 		// Temporary
+#if 0
 		{
 			Point start = {3,1};
 			Point end = {8,2};
 			ed_buffer_remove_range(state.current_buffer, make_text_range(start, end));
 		}
-		
+#else
 		{
 			Point start = {3,1};
 			Point end = {8,3};
 			ed_buffer_remove_range(state.current_buffer, make_text_range(start, end));
 		}
+#endif
 	}
 	
 	while (true) {

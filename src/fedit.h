@@ -198,6 +198,7 @@ static void ed_render_buffer(ED_Buffer *buffer);
 //- Editor debug functions
 
 static void ed_validate_buffer(ED_Buffer *buffer);
+static bool ed_text_point_exists(ED_Buffer *buffer, Point point);
 
 //- Editor global state functions
 

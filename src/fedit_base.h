@@ -169,6 +169,7 @@ typedef enum Direction Direction;
 //- Basic types functions
 
 static Text_Range make_text_range(Point start, Point end);
+static bool text_point_less_than(Point a, Point b);
 
 //- Integer math
 

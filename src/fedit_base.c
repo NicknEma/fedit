@@ -41,10 +41,20 @@ fsize(FILE *fp) {
 
 static Text_Range
 make_text_range(Point start, Point end) {
-	Text_Range result = {
-		.start = start,
-		.end   = end,
-	};
+	Text_Range result;
+	if (text_point_less_than(start, end)) {
+		result.start = start;
+		result.end   = end;
+	} else {
+		result.start = end;
+		result.end   = start;
+	}
+	return result;
+}
+
+static bool
+text_point_less_than(Point a, Point b) {
+	bool result = (a.y == b.y) ? (a.x < b.x) : (a.y < b.y);
 	return result;
 }
 
