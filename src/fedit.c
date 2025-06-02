@@ -1181,7 +1181,7 @@ int main(int argc, char **argv) {
 			Point end = {8,3};
 			ed_buffer_remove_range(state.current_buffer, make_text_range(start, end));
 		}
-#else
+#elif 0
 		{
 			Point start = {3,1};
 			ED_Delta delta = {60, Direction_VERTICAL, 0, 0};
