@@ -318,6 +318,8 @@ ed_buffer_remove_range(ED_Buffer *buffer, Text_Range range) {
 			}
 			
 			assert(!line->last_span);
+			ED_Span *span = ed_alloc_span(buffer);
+			dll_push_back(line->first_span, line->last_span, span);
 		}
 		
 		memmove(start_page->lines + start_line_in_page + 1, start_page->lines + start_line_in_page + lines_to_delete + 1,
@@ -352,7 +354,7 @@ ed_buffer_remove_range(ED_Buffer *buffer, Text_Range range) {
 		for (i64 i = 0; i < lines_to_delete; i += 1) {
 			i64 line_index = i + end_line_in_page - lines_to_delete;
 			
-			ED_Line *line = &start_page->lines[line_index];
+			ED_Line *line = &end_page->lines[line_index];
 			while (line->first_span) {
 				ED_Span *span = line->first_span;
 				dll_remove(line->first_span, line->last_span, span);
@@ -360,10 +362,16 @@ ed_buffer_remove_range(ED_Buffer *buffer, Text_Range range) {
 			}
 			
 			assert(!line->last_span);
+			ED_Span *span = ed_alloc_span(buffer);
+			dll_push_back(line->first_span, line->last_span, span);
+			
+			// We remove all spans and then put one back. Is it better if we stop before removing
+			// the last one? TODO.
+			// Same thing above.
 		}
 		
 		memmove(end_page->lines, end_page->lines + lines_to_delete, sizeof(ED_Line) * lines_to_delete);
-		start_page->line_count -= lines_to_delete;
+		end_page->line_count -= lines_to_delete;
 		buffer->line_count -= lines_to_delete;
 		
 		
@@ -376,7 +384,22 @@ ed_buffer_remove_range(ED_Buffer *buffer, Text_Range range) {
 		   (start_page == end_page));
 	
 	{
-		// TODO: Join lines
+		// Delete full pages in between
+		
+		if (start_page != end_page) {
+			while (start_page->next != end_page) {
+				ED_Page *page = start_page->next;
+				dll_remove(buffer->first_page, buffer->last_page, page);
+				stack_push(buffer->first_free_page, page);
+				
+				buffer->line_count -= page->line_count;
+				range.end.y -= cast(i32) page->line_count;
+			}
+		}
+	}
+	
+	{
+		// Join lines
 		
 		ED_Span *start_span = NULL;
 		i64 at_in_start_span = 0;
@@ -410,6 +433,7 @@ ed_buffer_remove_range(ED_Buffer *buffer, Text_Range range) {
 		} else {
 			
 			// Get variables that may have changed
+			// TODO: *CAN* they change? Or are pointers stable after previous modifications?
 			{
 				ED_Relative_Line rel = ed_relative_from_absolute_line(range.end.y);
 				end_page = rel.page;
@@ -1151,10 +1175,17 @@ int main(int argc, char **argv) {
 			Point end = {8,2};
 			ed_buffer_remove_range(state.current_buffer, make_text_range(start, end));
 		}
-#else
+#elif 0
 		{
 			Point start = {3,1};
 			Point end = {8,3};
+			ed_buffer_remove_range(state.current_buffer, make_text_range(start, end));
+		}
+#else
+		{
+			Point start = {3,1};
+			ED_Delta delta = {60, Direction_VERTICAL, 0, 0};
+			Point end = ed_buffer_clamp_delta(state.current_buffer, start, delta);
 			ed_buffer_remove_range(state.current_buffer, make_text_range(start, end));
 		}
 #endif

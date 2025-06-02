@@ -22,7 +22,7 @@
 #define esc(code) string_from_lit(ESCAPE_PREFIX code)
 
 #define ED_SPAN_SIZE 64
-#define ED_PAGE_SIZE 128
+#define ED_PAGE_SIZE 16
 
 #define ED_TAB_WIDTH 4
 
