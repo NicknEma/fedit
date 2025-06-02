@@ -294,7 +294,7 @@ ed_buffer_remove_range(ED_Buffer *buffer, Text_Range range) {
 	}
 	
 	// Validate arguments
-	assert(range.end.y >= range.start.y && range.end.x >= range.start.x);
+	assert(!text_point_less_than(range.end, range.start));
 	assert(ed_text_point_exists(buffer, range.start));
 	assert(ed_text_point_exists(buffer, range.end));
 	
@@ -533,6 +533,7 @@ ed_text_action_from_key(ED_Key key) {
 			action.flags |= ED_Text_Action_Flags_DELETE;
 			action.delta.delta = -1;
 			action.delta.direction = Direction_HORIZONTAL;
+			action.delta.cross_lines = true;
 		} break;
 		
 		case CTRL_KEY('h'):
@@ -540,6 +541,7 @@ ed_text_action_from_key(ED_Key key) {
 			action.flags |= ED_Text_Action_Flags_DELETE;
 			action.delta.delta = +1;
 			action.delta.direction = Direction_HORIZONTAL;
+			action.delta.cross_lines = true;
 		} break;
 		
 		// Nothing
