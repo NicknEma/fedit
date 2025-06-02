@@ -343,6 +343,9 @@ ed_buffer_remove_range(ED_Buffer *buffer, Text_Range range) {
 		end_line_in_page = rel.line;
 	}
 	
+	i64 end_page_original_line_count = end_page->line_count; // For debugging only
+	(void)end_page_original_line_count;
+	
 	{
 		// Delete lines from end upwards
 		
@@ -380,7 +383,7 @@ ed_buffer_remove_range(ED_Buffer *buffer, Text_Range range) {
 	}
 	
 	assert((start_line_in_page == start_page->line_count - 1 &&
-			end_page->line_count == ED_PAGE_SIZE - end_line_in_page) ||
+			end_page->line_count == end_page_original_line_count - end_line_in_page) ||
 		   (start_page == end_page));
 	
 	{
@@ -460,6 +463,11 @@ ed_buffer_remove_range(ED_Buffer *buffer, Text_Range range) {
 						(lines_remaining - lines_to_delete) * sizeof(ED_Line));
 				end_page->line_count -= lines_to_delete;
 				buffer->line_count -= lines_to_delete;
+				
+				if (end_page->line_count == 0) {
+					dll_remove(buffer->first_page, buffer->last_page, end_page);
+					stack_push(buffer->first_free_page, end_page);
+				}
 #endif
 				
 			}
@@ -1184,6 +1192,12 @@ int main(int argc, char **argv) {
 			ed_buffer_remove_range(state.current_buffer, make_text_range(start, end));
 		}
 #elif 0
+		{
+			Point start = {3,1};
+			ED_Delta delta = {60, Direction_VERTICAL, 0, 0};
+			Point end = ed_buffer_clamp_delta(state.current_buffer, start, delta);
+			ed_buffer_remove_range(state.current_buffer, make_text_range(start, end));
+		}
 		{
 			Point start = {3,1};
 			ED_Delta delta = {60, Direction_VERTICAL, 0, 0};
