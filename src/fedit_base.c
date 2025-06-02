@@ -385,6 +385,17 @@ string_find_first(String s, u8 c) {
 	return result;
 }
 
+static i64
+string_count_occurrences(String s, u8 c) {
+	i64 result = 0;
+	for (i64 i = 0; i < s.len; i += 1) {
+		if (s.data[i] == c) {
+			result += 1;
+		}
+	}
+	return result;
+}
+
 static String
 string_skip(String s, i64 amount) {
 	if (amount > s.len) {

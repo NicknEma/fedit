@@ -138,18 +138,21 @@ struct ED_State {
 	ED_Buffer *null_buffer;
 };
 
-typedef struct ED_Relative_Line ED_Relative_Line;
-struct ED_Relative_Line {
+//- Sinthetic types only used as return values for functions
+
+typedef struct ED_Page_I64 ED_Page_I64;
+struct ED_Page_I64 {
 	ED_Page *page;
-	i64 line;
+	i64 i;
 };
 
-typedef struct ED_Relative_Span ED_Relative_Span;
-struct ED_Relative_Span {
+typedef struct ED_Span_I64 ED_Span_I64;
+struct ED_Span_I64 {
 	ED_Span *span;
-	i64 at;
+	i64 i;
 };
 
+#if 0
 typedef struct ED_Page_Line ED_Page_Line;
 struct ED_Page_Line {
 	ED_Page *page;
@@ -163,64 +166,62 @@ struct ED_Page_Line_Span_Point {
 	ED_Span *span;
 	Point point;
 };
+#endif
 
-//- Editor span functions
+//- Editor elements allocation functions
 
 static ED_Span *ed_push_span(Arena *arena);
 static ED_Span *ed_alloc_span(ED_Buffer *buffer);
 
-// In the following functions, the buffer is needed for allocations
-static ED_Page_Line_Span_Point ed_span_append_text(ED_Buffer *buffer, ED_Page *page, ED_Line *line, ED_Span *span, String text);
-static Point    ed_span_insert_text(ED_Buffer *buffer, ED_Page *page, ED_Line *line, ED_Span *span,
-									i64 at_in_span, String text);
-
-static Point    ed_span_insert_text_at_point(ED_Buffer *buffer, Point point, String text);
-
-//- Editor page functions
-
 static ED_Page *ed_push_page(Arena *arena);
 static ED_Page *ed_alloc_page(ED_Buffer *buffer);
 
-//- Editor line functions
+//- Main buffer modification functions
+
+static void  ed_buffer_remove_range(ED_Buffer *buffer, Text_Range range);
+static Point ed_buffer_insert_text_at_point(ED_Buffer *buffer, Point point, String text);
+
+//- Buffer modification helper functions
+
+static void ed_move_lines_across_pages(ED_Page *dest_page, i64 dest_index, ED_Page *src_page, i64 src_index, i64 count);
+static ED_Span *ed_span_append_text_without_newlines(ED_Buffer *buffer, ED_Line *line, ED_Span *span, String text);
+static void ed_clear_line(ED_Buffer *buffer, ED_Line *line, bool deep_clean);
+static void ed_clear_line_range_across_pages(ED_Buffer *buffer, ED_Page *page, i64 start, i64 end, bool deep_clean);
+
+//- General helper functions
 
 static i64 ed_line_len(ED_Line *line);
-static String string_from_ed_line(Arena *arena, ED_Line *line);
-static ED_Page_Line ed_get_next_line(ED_Buffer *buffer, ED_Page *page, ED_Line *line);
-static ED_Relative_Line ed_relative_from_absolute_line(i64 absolute_line);
-static ED_Line *ed_line_from_line_number(i64 line_number);
-static ED_Line *ed_get_current_line();
-static ED_Relative_Span ed_relative_span_from_line_and_pos(ED_Line *line, i64 pos);
-
-//- Editor input processing
-
-static ED_Text_Action    ed_text_action_from_key(ED_Key key); // TODO: Replace key with event
-static ED_Text_Operation ed_text_operation_from_action(Arena *arena, ED_Buffer *buffer, ED_Text_Action action);
-
-//- Editor helper functions
+static String ed_string_from_line(Arena *arena, ED_Line *line);
 
 static Point ed_buffer_clamp_delta(ED_Buffer *buffer, Point point, ED_Delta delta);
 static bool ed_buffer_is_in_use(ED_Buffer *buffer);
 
-//- Editor buffer functions
+static ED_Span_I64 ed_relative_span_from_line_and_pos(ED_Line *line, i64 pos);
+static ED_Page_I64 ed_relative_from_absolute_line(ED_Buffer *buffer, i64 absolute_line);
 
-static void ed_move_cursor(ED_Key key);
+static ED_Line *ed_line_from_line_number(ED_Buffer *buffer, i64 line_number);
+
+//- Input processing functions
+
+static ED_Text_Action    ed_text_action_from_key(ED_Key key); // TODO: Replace key with event
+static ED_Text_Operation ed_text_operation_from_action(Arena *arena, ED_Buffer *buffer, ED_Text_Action action);
+
 static void ed_buffer_apply_operation(ED_Buffer *buffer, ED_Text_Operation op);
-static void ed_buffer_remove_range(ED_Buffer *buffer, Text_Range range);
 
-static Point ed_buffer_split_at_point(ED_Buffer *buffer, Point point);
-static void  ed_buffer_split_at_cursor(ED_Buffer *buffer);
-
-//- Editor load/save functions
+//- Load/save functions
 
 static void ed_init_buffer_contents(ED_Buffer *buffer, SliceU8 contents);
 static bool ed_load_file(String file_name);
 
-//- Editor rendering functions
+//- Main rendering functions
 
-static void ed_update_scroll(void);
+static void ed_buffer_update_scroll(ED_Buffer *buffer);
+static void ed_render_buffer(ED_Buffer *buffer);
+
+//- Rendering helper functions
+
 static String ed_render_string_from_stored_string(Arena *arena, String stored_string);
 static i64 ed_render_x_from_stored_x(String stored_string, i64 stored_x);
-static void ed_render_buffer(ED_Buffer *buffer);
 
 //- Editor debug functions
 

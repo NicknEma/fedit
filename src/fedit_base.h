@@ -96,25 +96,25 @@ static size_t fsize(FILE *fp);
 #define check_null(p) ((p)==0)
 #define set_null(p) ((p)=0)
 
-#define stack_push_n(f,n,next) ((n)->next=(f),(f)=(n))
-#define stack_pop_nz(f,next,zchk) (zchk(f)?0:((f)=(f)->next))
+#define stack_push_n(f,n,next) (void)((n)->next=(f),(f)=(n))
+#define stack_pop_nz(f,next,zchk) (void)(zchk(f)?0:((f)=(f)->next))
 
-#define queue_push_nz(f,l,n,next,zchk,zset) (zchk(f)?\
+#define queue_push_nz(f,l,n,next,zchk,zset) (void)(zchk(f)?\
 (((f)=(l)=(n)), zset((n)->next)):\
 ((l)->next=(n),(l)=(n),zset((n)->next)))
-#define queue_push_front_nz(f,l,n,next,zchk,zset) (zchk(f) ? (((f) = (l) = (n)), zset((n)->next)) :\
+#define queue_push_front_nz(f,l,n,next,zchk,zset) (void)(zchk(f) ? (((f) = (l) = (n)), zset((n)->next)) :\
 ((n)->next = (f)), ((f) = (n)))
-#define queue_pop_nz(f,l,next,zset) ((f)==(l)?\
+#define queue_pop_nz(f,l,next,zset) (void)((f)==(l)?\
 (zset(f),zset(l)):\
 ((f)=(f)->next))
 
 #define dll_insert_npz(f,l,p,n,next,prev,zchk,zset) \
-(zchk(f) ? (((f) = (l) = (n)), zset((n)->next), zset((n)->prev)) :\
+(void)(zchk(f) ? (((f) = (l) = (n)), zset((n)->next), zset((n)->prev)) :\
 zchk(p) ? (zset((n)->prev), (n)->next = (f), (zchk(f) ? (0) : ((f)->prev = (n))), (f) = (n)) :\
 ((zchk((p)->next) ? (0) : (((p)->next->prev) = (n))), (n)->next = (p)->next, (n)->prev = (p), (p)->next = (n),\
 ((p) == (l) ? (l) = (n) : (0))))
 #define dll_push_back_npz(first,last,elem,next_ident,prev_ident,zero_check,zero_set) dll_insert_npz(first,last,last,elem,next_ident,prev_ident,zero_check,zero_set)
-#define dll_remove_npz(f,l,n,next,prev,zchk,zset) (((f)==(n))?\
+#define dll_remove_npz(f,l,n,next,prev,zchk,zset) (void)(((f)==(n))?\
 ((f)=(f)->next, (zchk(f) ? (zset(l)) : zset((f)->prev))):\
 ((l)==(n))?\
 ((l)=(l)->prev, (zchk(l) ? (zset(f)) : zset((l)->next))):\
@@ -307,7 +307,10 @@ static String string_clone_buffer(u8 *buffer, i64 buffer_len, String s);
 static char *cstring_from_string(Arena *arena, String s);
 static bool string_starts_with(String a, String b);
 static i64 string_find_first(String s, u8 c);
+static i64 string_count_occurrences(String s, u8 c);
 static String string_skip(String s, i64 amount);
+static String string_chop(String s, i64 amount);
+static String string_stop(String s, i64 index);
 
 ////////////////////////////////
 //~ String Builder
